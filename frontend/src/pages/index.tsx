@@ -95,6 +95,14 @@ export default function Dashboard() {
 
   const rangeLabel = RANGES.find((x) => x.value === hours)?.label ?? `${hours}h`
 
+  /** Outstanding ecash over the same window. Raw change — no floor, since this is
+   *  volume rather than an alerting signal, and hiding a small real movement
+   *  would lose information for no benefit. */
+  const ecashChange =
+    real.length >= 2
+      ? (real[real.length - 1].ecashIssued as number) - (real[0].ecashIssued as number)
+      : null
+
   /** Absorbs msat→sat rounding; real thresholds are calibrated in the rules. */
   const MATERIAL_SAT = 1_000
 
@@ -166,7 +174,18 @@ export default function Dashboard() {
               : undefined
           }
         />
-        <StatTile label="Ecash issued" value={formatSat(r?.mintBalance)} />
+        {/*
+          Deliberately toneless. Outstanding ecash rising or falling is business
+          volume, not a health signal — colouring growth green would assert that
+          more circulating ecash is good, which is not this tool's judgement, and
+          status colours are reserved for conditions that are actually good or bad.
+        */}
+        <StatTile
+          label="Ecash issued"
+          value={formatSat(r?.mintBalance)}
+          delta={ecashChange === null ? null : `${signed(ecashChange)} over ${rangeLabel}`}
+          deltaTone="neutral"
+        />
         <StatTile
           label="Own capital"
           value={formatSat(r?.ownCapital)}

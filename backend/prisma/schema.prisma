@@ -1,0 +1,376 @@
+// Minibits Watchdog — see SPEC.md §5
+//
+// All monetary columns are BigInt msat. Every raw source field is persisted
+// verbatim so a derivation error stays repairable across existing history
+// (SPEC.md §3.5) — derived values live in Reconciliation, never overwriting
+// what was actually observed.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceStatus {
+  OK
+  UNREACHABLE
+  ERROR
+  TIMEOUT
+  SKIPPED
+}
+
+/// One coherent observation across all sources.
+///
+/// All sources are read as close together as possible and share a single
+/// observedAt, with the actual spread recorded in skewMs. Reconciling values
+/// read minutes apart would be meaningless.
+///
+/// A row is written even when a source fails, with the snapshot absent and the
+/// status set — a gap must be distinguishable from "nothing happened".
+model Observation {
+  id         Int      @id @default(autoincrement())
+  observedAt DateTime
+  skewMs     Int      @default(0)
+  durationMs Int      @default(0)
+
+  lndStatus  SourceStatus
+  mintStatus SourceStatus
+
+  lndError  String?
+  mintError String?
+
+  lnd            LndSnapshot?
+  mints          MintSnapshot[]
+  reconciliation Reconciliation?
+
+  createdAt DateTime @default(now())
+
+  @@index([observedAt])
+}
+
+/// Raw LND telemetry, stored verbatim. Node-level, so one row per observation.
+model LndSnapshot {
+  id            Int         @id @default(autoincrement())
+  observationId Int         @unique
+  observation   Observation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+
+  // ChannelBalanceResponse
+  channelLocal            BigInt
+  channelRemote           BigInt
+  channelUnsettledLocal   BigInt
+  channelUnsettledRemote  BigInt
+  channelPendingOpenLocal BigInt
+  channelPendingOpenRemote BigInt
+
+  // WalletBalanceResponse
+  onchainTotal         BigInt
+  onchainConfirmed     BigInt
+  onchainUnconfirmed   BigInt
+  onchainLocked        BigInt
+  onchainReservedAnchor BigInt
+
+  // PendingChannelsResponse
+  limbo                  BigInt
+  pendingOpenCount       Int
+  pendingForceCloseCount Int
+  waitingCloseCount      Int
+
+  // GetInfoResponse
+  blockHeight         Int
+  syncedToChain       Boolean
+  syncedToGraph       Boolean
+  numActiveChannels   Int
+  numInactiveChannels Int
+  numPendingChannels  Int
+  version             String
+
+  /// Full unmodified responses, for retroactive re-derivation.
+  raw Json
+
+  @@index([observationId])
+}
+
+/// Mint telemetry, one row per unit per observation (reconciliation is per-unit).
+model MintSnapshot {
+  id            Int         @id @default(autoincrement())
+  observationId Int
+  observation   Observation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+
+  unit String
+
+  // keyset_amounts — CDK's running ledger (the cheap per-tick read)
+  issued       BigInt
+  redeemed     BigInt
+  feeCollected BigInt
+
+  // proof table — PENDING only. Unspent/spent totals are not collected per tick:
+  // they need a full scan of the large proof table, and `outstanding` and
+  // `redeemed` above already carry the same information from keyset_amounts.
+  // They are verified instead by the weekly ledger drift check (§4.2).
+  proofsPending      BigInt
+  proofsPendingCount Int
+
+  // Derived from the append-only ledger tables (sum of payments − sum of
+  // issuance), not from mint_quote, which has no index for the predicate.
+  // The count is nullable because the ledgers cannot supply one: storing 0
+  // would assert "none" where we mean "not measured".
+  unclaimedMintQuotes      BigInt
+  unclaimedMintQuotesCount Int?
+  /// amount_issued > amount_paid: ecash issued against an unpaid quote. Must be 0.
+  overIssuedMintQuotes     BigInt
+
+  // melt_quote — stuck-melt detection, NOT a reconciliation term
+  pendingMeltQuotes      BigInt
+  pendingMeltQuotesCount Int
+  meltFeeReserve         BigInt
+
+  // transient operation tables
+  sagasInFlight            Int
+  meltRequestsInFlight     Int
+  meltRequestsInputsAmount BigInt
+
+  // On-chain reserves held by the mint's own BDK wallet, derived from CDK's
+  // ledger. Interim: it verifies internal consistency, not custody, because it
+  // reads the same books the watchdog audits.
+  onchainBalance   BigInt @default(0)
+  onchainDeposits  BigInt @default(0)
+  onchainWithdrawn BigInt @default(0)
+  onchainQuotes    Int    @default(0)
+
+  keysetsActive Int
+  keysetsTotal  Int
+
+  /// Per-keyset issued/redeemed/fees for the dashboard drill-down.
+  /// JSON rather than a child table: three rows per observation would triple the
+  /// row count for data no rule queries. Promote to a table if a keyset-level
+  /// rule ever needs it.
+  keysetBreakdown Json?
+
+  raw Json
+
+  @@unique([observationId, unit])
+  @@index([unit])
+}
+
+/// Derived reconciliation for the backing unit. See SPEC.md §3.
+///
+/// Levels only — windowed rates are computed at query time so a change to the
+/// window definitions does not require recollecting or rewriting history.
+model Reconciliation {
+  id            Int         @id @default(autoincrement())
+  observationId Int         @unique
+  observation   Observation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+
+  unit String
+
+  /// Channel + Wallet + Limbo. Measured from LND — kept free of declared values.
+  totalNodeBalance BigInt
+  /// Operator-declared reserves held outside the node (COLD_STORAGE_RESERVES).
+  coldStorage      BigInt @default(0)
+  /// On-chain reserves in the mint's own BDK wallet (ledger-derived, interim).
+  mintOnchain      BigInt @default(0)
+  /// issued − redeemed
+  mintBalance      BigInt
+  proofsPending    BigInt
+  /// The mint's own capital: reserves in excess of what it owes.
+  /// totalNodeBalance + coldStorage − mintBalance + proofsPending
+  /// (called "Total difference" in the original tracking spreadsheet)
+  ownCapital       BigInt
+  unclaimed        BigInt
+
+  /// Cumulative mint input fees (keyset_amounts.fee_collected).
+  ///
+  /// Mint fees are taken by BURNING the wallet's ecash: inputs exceed outputs, so
+  /// `issued − redeemed` falls while reserves are untouched. Fee income therefore
+  /// arrives *as* own capital rather than as a separate asset. Distinct from
+  /// Lightning routing income, which is not separately measurable.
+  mintFeesCollected BigInt @default(0)
+
+  // Differences against the immediately preceding reconciliation, mirroring the
+  // manual sheet. Null on the first row and whenever the previous observation
+  // was incomplete.
+  prevObservationId Int?
+  elapsedMs         Int?
+  deltaOwnCapital   BigInt?
+  deltaUnclaimed    BigInt?
+  /// Change in declared cold-storage reserves. Subtracted below because an
+  /// operator-declared movement is *explained* — without this, editing
+  /// COLD_STORAGE_RESERVES would step ownCapital and read as drift.
+  deltaColdStorage  BigInt?
+  /// Change in cumulative mint fees. Subtracted because it is explained income.
+  ///
+  /// Not merely tidiness: fee income can MASK a leak. Earning +X while something
+  /// drains −X leaves remainingDelta at zero and the mint looking healthy.
+  /// Removing known income exposes the drain.
+  deltaMintFees     BigInt?
+  /// deltaOwnCapital − deltaUnclaimed − deltaColdStorage − deltaMintFees.
+  /// The alertable number: change in own capital that nothing explains.
+  remainingDelta    BigInt?
+
+  createdAt DateTime @default(now())
+
+  @@index([unit, createdAt])
+}
+
+enum AlertStatus {
+  /// Condition seen, but has not yet held for `forEvaluations`. Never notified.
+  /// Distinct from RESOLVED so a not-yet-fired alert is not misread as one that
+  /// fired and recovered.
+  PENDING
+  FIRING
+  RESOLVED
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/// Current state of one rule instance. See SPEC.md §7.
+///
+/// Keyed by (ruleId, dedupeKey) so a rule can track several independent
+/// subjects — one stuck melt quote per row, for instance — without collapsing
+/// them into a single alert.
+model AlertState {
+  id        Int    @id @default(autoincrement())
+  ruleId    String
+  dedupeKey String
+
+  status   AlertStatus
+  severity Severity
+
+  title  String
+  detail String?
+
+  /// Consecutive evaluations the condition has held. Gates the `for` duration.
+  consecutiveHits   Int @default(0)
+  consecutiveMisses Int @default(0)
+
+  firstSeenAt    DateTime
+  lastEvaluatedAt DateTime
+  firedAt        DateTime?
+  resolvedAt     DateTime?
+  lastNotifiedAt DateTime?
+  notifyCount    Int       @default(0)
+
+  context Json?
+
+  events AlertEvent[]
+
+  @@unique([ruleId, dedupeKey])
+  @@index([status])
+}
+
+enum AlertEventKind {
+  FIRED
+  RESOLVED
+  RENOTIFIED
+  NOTIFY_FAILED
+}
+
+/// Append-only history of alert transitions and delivery attempts.
+model AlertEvent {
+  id           Int            @id @default(autoincrement())
+  alertStateId Int
+  alertState   AlertState     @relation(fields: [alertStateId], references: [id], onDelete: Cascade)
+
+  kind    AlertEventKind
+  at      DateTime       @default(now())
+  detail  String?
+  context Json?
+
+  @@index([alertStateId, at])
+}
+
+/// Per-rule tuning, seeded from code defaults so thresholds change without a redeploy.
+model RuleConfig {
+  id     Int     @id @default(autoincrement())
+  ruleId String  @unique
+
+  enabled  Boolean  @default(true)
+  severity Severity @default(WARNING)
+
+  /// Evaluations the condition must hold before firing.
+  forEvaluations Int @default(2)
+  /// Evaluations the condition must be absent before resolving (hysteresis).
+  clearEvaluations Int @default(2)
+  /// Minimum seconds between repeat notifications while still firing.
+  cooldownSeconds Int @default(3600)
+
+  /// Whether clearing sends a notification.
+  ///
+  /// True for STATE rules — "LND is unreachable" resolving is worth knowing.
+  /// False for EVENT rules, where the condition describes something that
+  /// happened rather than something that is ongoing: a collection gap or a
+  /// keyset rotation has nothing to "clear", so a resolution notice is pure
+  /// noise and doubles the cost of every occurrence.
+  notifyOnResolve Boolean @default(true)
+
+  /// Rule-specific thresholds.
+  params Json @default("{}")
+
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+}
+
+/// Running totals over the mint's append-only ledger tables.
+///
+/// `mint_quote` has no index supporting `amount_paid > amount_issued`, so
+/// computing "Total unclaimed" from it costs a full scan of a large, wide table —
+/// impossible every
+/// five minutes. `mint_quote_payments` and `mint_quote_issued` are narrow,
+/// append-only, and keyed by a monotonic integer PK, so the same figure comes
+/// from `sum(payments) − sum(issued)` at O(new rows) per tick after one initial
+/// pass.
+///
+/// `frozenUpToId` deliberately lags `max(id)` by an overlap window. A sequence
+/// assigns ids before commit, so a lower id can commit *after* a higher one;
+/// without the lag, such a row would be skipped permanently. The overlap
+/// segment is recomputed every tick, so late commits inside it are picked up.
+model LedgerWatermark {
+  id     Int    @id @default(autoincrement())
+  ledger String @unique
+
+  /// Rows with id <= this are fully accounted for in frozenTotal.
+  frozenUpToId BigInt @default(0)
+  frozenTotal  BigInt @default(0)
+
+  updatedAt DateTime @updatedAt
+}
+
+/// Mint quotes settled on-chain rather than over Lightning.
+///
+/// Cached here so the per-tick sum is a set of primary-key lookups against
+/// `mint_quote` rather than a scan for `payment_method='onchain'`, which has no
+/// supporting index on a large table.
+///
+/// Discovery is watermarked on `created_time`, which is safe because creation
+/// time never changes — unlike `amount_paid`, which is why the amount itself is
+/// re-read every tick instead of being cached.
+model MintOnchainQuote {
+  id          Int      @id @default(autoincrement())
+  quoteId     String   @unique
+  createdTime Int
+  discoveredAt DateTime @default(now())
+
+  @@index([createdTime])
+}
+
+/// Discrete observations that are not time series — keyset changes, force-closes,
+/// collector failures.
+model Event {
+  id     Int      @id @default(autoincrement())
+  at     DateTime @default(now())
+  source String
+  kind   String
+  detail String?
+  context Json?
+
+  @@index([at])
+  @@index([kind, at])
+}

@@ -1,0 +1,154 @@
+/**
+ * Monetary values arrive as decimal strings, not numbers: they are msat BigInt
+ * server-side, and msat totals will outgrow a JS double. Parse with BigInt, and
+ * only convert to Number for rendering.
+ */
+export type Msat = string
+
+export type SourceStatus = 'OK' | 'UNREACHABLE' | 'ERROR' | 'TIMEOUT' | 'SKIPPED'
+
+export interface LndSnapshot {
+  channelLocal: Msat
+  channelRemote: Msat
+  channelUnsettledLocal: Msat
+  channelUnsettledRemote: Msat
+  channelPendingOpenLocal: Msat
+  channelPendingOpenRemote: Msat
+
+  onchainTotal: Msat
+  onchainConfirmed: Msat
+  onchainUnconfirmed: Msat
+  onchainLocked: Msat
+  onchainReservedAnchor: Msat
+
+  limbo: Msat
+  pendingOpenCount: number
+  pendingForceCloseCount: number
+  waitingCloseCount: number
+
+  blockHeight: number
+  syncedToChain: boolean
+  syncedToGraph: boolean
+  numActiveChannels: number
+  numInactiveChannels: number
+  numPendingChannels: number
+  version: string
+}
+
+export interface MintSnapshot {
+  unit: string
+  issued: Msat
+  redeemed: Msat
+  feeCollected: Msat
+  proofsPending: Msat
+  proofsPendingCount: number
+  onchainBalance: Msat
+  onchainDeposits: Msat
+  onchainWithdrawn: Msat
+  onchainQuotes: number
+  unclaimedMintQuotes: Msat
+  overIssuedMintQuotes: Msat
+  pendingMeltQuotes: Msat
+  sagasInFlight: number
+  meltRequestsInFlight: number
+  keysetsActive: number
+  keysetsTotal: number
+  keysetBreakdown: KeysetRow[] | null
+}
+
+export interface Reconciliation {
+  unit: string
+  totalNodeBalance: Msat
+  coldStorage: Msat
+  mintOnchain: Msat
+  mintBalance: Msat
+  proofsPending: Msat
+  ownCapital: Msat
+  unclaimed: Msat
+  mintFeesCollected: Msat
+  deltaOwnCapital: Msat | null
+  deltaUnclaimed: Msat | null
+  deltaColdStorage: Msat | null
+  deltaMintFees: Msat | null
+  remainingDelta: Msat | null
+}
+
+export interface KeysetRow {
+  keysetId: string
+  unit: string
+  active: boolean
+  inputFeePpk: number
+  validFrom: number
+  issued: Msat
+  redeemed: Msat
+  feeCollected: Msat
+}
+
+export interface Observation {
+  id: number
+  observedAt: string
+  skewMs: number
+  durationMs: number
+  lndStatus: SourceStatus
+  mintStatus: SourceStatus
+  lndError: string | null
+  mintError: string | null
+  lnd: LndSnapshot | null
+  mints: MintSnapshot[]
+  reconciliation: Reconciliation | null
+}
+
+export interface TimeseriesPoint {
+  t: string
+  unit: string
+  totalNodeBalance: Msat
+  coldStorage: Msat
+  mintOnchain: Msat
+  mintBalance: Msat
+  proofsPending: Msat
+  ownCapital: Msat
+  unclaimed: Msat
+  remainingDelta: Msat | null
+}
+
+export interface DeltaResponse {
+  minutes: number
+  samples: number
+  from?: string
+  to?: string
+  elapsedMs: number | null
+  maxGapMs: number | null
+  deltas: {
+    unit: string
+    ownCapital: Msat
+    unclaimed: Msat
+    coldStorage: Msat
+    mintFees: Msat
+    remaining: Msat
+  } | null
+}
+
+export type AlertStatus = 'PENDING' | 'FIRING' | 'RESOLVED'
+export type Severity = 'INFO' | 'WARNING' | 'CRITICAL'
+
+export interface Alert {
+  id: number
+  ruleId: string
+  dedupeKey: string
+  status: AlertStatus
+  severity: Severity
+  title: string
+  detail: string | null
+  firedAt: string | null
+  resolvedAt: string | null
+  lastEvaluatedAt: string
+  notifyCount: number
+}
+
+export interface CollectorStatus {
+  observations: number
+  latestObservedAt: string | null
+  latestLndStatus: SourceStatus | null
+  latestMintStatus: SourceStatus | null
+  lastSuccessfulLndAt: string | null
+}

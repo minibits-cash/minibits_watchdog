@@ -1,0 +1,44 @@
+{
+  "name": "minibits-watchdog-backend",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start:dev": "ts-node-dev --respawn --pretty --transpile-only --project tsconfig.json src/index.ts",
+    "build": "tsc --project tsconfig.json --noEmit && esbuild src/index.ts --bundle --platform=node --target=es2022 --format=esm --outdir=dist --packages=external --sourcemap",
+    "start:prod": "node dist/index.js",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "probe:lnd": "esbuild scripts/probe-lnd.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/probe-lnd.js --log-level=warning && node dist/probe-lnd.js",
+    "sql": "node scripts/run-sql.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prisma:updateTypes": "npx prisma generate",
+    "prisma:updateDb": "npx prisma db push"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@lightningpolar/lnd-api": "^0.19.0-beta",
+    "@prisma/client": "^6.13.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.1",
+    "fastify": "^5.4.0",
+    "nodemailer": "^9.0.5",
+    "pg": "^8.16.3",
+    "react-native-logs": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pg": "^8.15.5",
+    "esbuild": "^0.27.2",
+    "prisma": "^6.13.0",
+    "ts-node": "10.9.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": "^24"
+  }
+}

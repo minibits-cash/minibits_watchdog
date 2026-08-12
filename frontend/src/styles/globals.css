@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Visualisation tokens.
+ *
+ * Charts are written against ROLES, never raw hex, so the light/dark values swap
+ * in one place. Palette is the validated default: categorical slots 1 (blue) and
+ * 2 (orange) pass every check in both modes — lightness band, chroma floor, CVD
+ * separation, normal-vision floor and contrast vs surface.
+ *
+ * Dark is a selected set of steps for the dark surface, not an automatic flip.
+ */
+:root {
+  color-scheme: light;
+
+  --viz-surface: #fcfcfb;
+  --viz-plane: #f9f9f7;
+  --viz-ink: #0b0b0b;
+  --viz-ink-2: #52514e;
+  --viz-muted: #898781;
+  --viz-grid: #e1e0d9;
+  --viz-axis: #c3c2b7;
+  --viz-border: rgba(11, 11, 11, 0.1);
+
+  --series-1: #2a78d6; /* node reserves */
+  --series-2: #eb6834; /* ecash issued  */
+
+  /* Status is reserved — never reused as a series colour. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-good-text: #006300;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+
+    --viz-surface: #1a1a19;
+    --viz-plane: #0d0d0d;
+    --viz-ink: #ffffff;
+    --viz-ink-2: #c3c2b7;
+    --viz-muted: #898781;
+    --viz-grid: #2c2c2a;
+    --viz-axis: #383835;
+    --viz-border: rgba(255, 255, 255, 0.1);
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+
+    --status-good-text: #0ca30c;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --viz-surface: #1a1a19;
+  --viz-plane: #0d0d0d;
+  --viz-ink: #ffffff;
+  --viz-ink-2: #c3c2b7;
+  --viz-muted: #898781;
+  --viz-grid: #2c2c2a;
+  --viz-axis: #383835;
+  --viz-border: rgba(255, 255, 255, 0.1);
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+
+  --status-good-text: #0ca30c;
+}
+
+body {
+  background: var(--viz-plane);
+  color: var(--viz-ink);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Recharts focus outlines are noisy; keyboard focus is handled on our own controls. */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}

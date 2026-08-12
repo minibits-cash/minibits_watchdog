@@ -1,0 +1,218 @@
+# Minibits Watchdog
+
+Internal monitoring for a Lightning node (LND) and a Cashu mint (CDK). It watches whether
+the value backing the mint still matches the ecash the mint has issued, and alerts on
+discrepancies, stuck operations and node problems.
+
+Design and rationale live in **[SPEC.md](SPEC.md)** — it records *why* each decision was
+made, including several that look wrong until you know what they prevent.
+
+> **Read-only by design.** The watchdog never writes to LND or the mint. It uses LND's
+> `readonly.macaroon` and a `SELECT`-only Postgres role, so a compromised watchdog cannot
+> move funds or corrupt mint state. This is a hard boundary, not a default.
+
+## What it measures
+
+```
+Reserves        = LND channel local + LND on-chain + limbo
+                  + cold storage (declared) + mint on-chain wallet
+Own capital     = Reserves − Ecash issued + Proofs pending
+Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage − Δ Mint fees
+```
+
+**`Own capital` is the mint's equity** — reserves beyond what it owes. It is a *level*, and
+meaningless on its own: it accumulates routing income, fee rounding, channel reserve and
+initial capitalisation. Only its change carries signal.
+
+**`Remaining delta` is the alertable number.** Every subtracted term is an *explained*
+change, so what remains is the part nothing accounts for. Known income is removed rather
+than tolerated — earning fees while something drains an equal amount would otherwise read
+as zero.
+
+`Unclaimed` (paid on Lightning or on-chain, ecash not yet issued) is currently counted as
+own capital, with the conservative net-of-unclaimed figure shown alongside it. See
+[SPEC.md §3](SPEC.md).
+
+## Status
+
+| Step | State |
+|---|---|
+| 1. Scaffold | done |
+| 2. Storage (Prisma schema) | done |
+| 3. LND collector | done |
+| 4. Mint collector | done |
+| 5. Reconciliation | done |
+| 6. Rule engine + alert lifecycle | done — 13 rules |
+| 7. Notifiers (ntfy, email) + deadman's switch | done |
+| 8. Dashboard | done |
+| 9. Backfill + threshold calibration | **pending** |
+
+> ⚠ **Alert thresholds are placeholders, not calibrated.** The `reserve_drift_*` rules fire
+> on numbers chosen by hand, and `mint_proofs_pending_high` is deliberately set above the
+> observed baseline, so it is currently insensitive rather than noisy. Calibrate against
+> real history before trusting them either way.
+
+## Layout
+
+```
+backend/          Fastify + Prisma. Collector, rules, notifiers, API.
+backend/scripts/  Operational tooling (SQL runner, LND probe, backfill).
+frontend/         Next 14 + Tailwind. Dashboard, SSH-tunnel only.
+scripts/          Read-only SQL for inspecting the mint database.
+SPEC.md           Specification and rationale.
+```
+
+## Setup
+
+Requires Node 24 and a Postgres instance for the watchdog's own data — **separate from the
+mint**, so watchdog load cannot affect the mint and the watchdog survives (and can alert
+on) mint database failure.
+
+### Backend
+
+```bash
+cd backend
+cp .env.example .env      # every option is documented inline
+npm install
+npm run prisma:updateDb   # push schema to the watchdog database
+npm run start:dev
+```
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.example .env.local
+npm install
+npm run build && npm run start    # http://localhost:3006
+```
+
+### Mint database role
+
+```sql
+CREATE ROLE watchdog_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE <mintdb> TO watchdog_ro;
+GRANT USAGE ON SCHEMA public TO watchdog_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO watchdog_ro;
+
+-- Survives future CDK migrations that add tables.
+ALTER DEFAULT PRIVILEGES FOR ROLE <mint-owner> IN SCHEMA public
+  GRANT SELECT ON TABLES TO watchdog_ro;
+
+ALTER ROLE watchdog_ro SET default_transaction_read_only = on;
+ALTER ROLE watchdog_ro SET statement_timeout = '30s';
+```
+
+> ⚠ **Dropping and recreating the mint database destroys the grants.** Roles and
+> `pg_hba.conf` are cluster-level and survive; table grants and default privileges live
+> *inside* the database and do not. **Put these statements in the migration script** rather
+> than relying on memory — the watchdog will refuse to collect and say exactly which tables
+> it cannot read, but only after it has already stopped working.
+
+The `ALTER DEFAULT PRIVILEGES` line is the one that is easy to skip and expensive to omit:
+without it, a future migration adds a table the watchdog silently cannot read.
+
+### Access
+
+Both processes bind to loopback. The dashboard has no authentication by design — reach it
+over an SSH tunnel:
+
+```bash
+ssh -L 3006:127.0.0.1:3006 -L 3005:127.0.0.1:3005 <host>
+```
+
+## Configuration highlights
+
+Everything is documented inline in `backend/.env.example`. The options most worth knowing:
+
+| Variable | Why it matters |
+|---|---|
+| `ENABLED_SOURCES` | `lnd,mint`. Credentials are required only for enabled sources, so disabling is explicit — an accidentally missing macaroon fails loudly instead of silently leaving the node unmonitored. |
+| `ENABLED_NOTIFIERS` | `ntfy,email`. Enabling both gives delivery redundancy: a send succeeds if *any* transport does, and a partial failure is still recorded. |
+| `NOTIFY_REDACT_AMOUNTS` | Strips figures from outbound alerts. Alert text carries reserve amounts and channel balances; public ntfy topics are unauthenticated and SMTP is encrypted hop-by-hop only. Severity and subject survive, so alerts stay actionable. |
+| `COLD_STORAGE_RESERVES` | Operator-declared reserves held outside the node. Changing it is treated as a *declared* movement and excluded from drift — but the window between moving coins and updating it will alert, by design. |
+| `HEARTBEAT_URL` | Optional. Log markers work without it (below). |
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/introspect-mint-db.sql` | Schema discovery via psql. Catalog-only, safe on a live mint. |
+| `scripts/introspect-mint-db-beekeeper.sql` | Same, as a single query for GUI clients. |
+| `scripts/verify-mint-light.sql` | The per-tick query set. Index-assisted, negligible cost — also a load rehearsal for the production path. |
+| `scripts/explain-mint-queries.sql` | `EXPLAIN` without `ANALYZE`. Planner estimates only, nothing executed. |
+| `scripts/verify-mint-accounting.sql` | Full ledger cross-check. **Scans the two largest tables** — see below. |
+| `backend/scripts/run-sql.mjs` | Runs a single-statement `.sql` file through the app's own read-only path. |
+| `backend/scripts/probe-lnd.ts` | `npm run probe:lnd` — reads LND through the real collector code path. |
+| `backend/scripts/backfill-onchain.mjs` | One-off. Repairs history after a change to what `Reserves` includes. Dry-run by default. |
+
+## Before trusting reserve figures in production
+
+1. **Run `scripts/verify-mint-accounting.sql` once.** Section G does two jobs: it verifies
+   CDK's running `keyset_amounts` has not drifted from the underlying rows, **and** it
+   settles whether the `+ Proofs pending` term is correct ([SPEC.md §3.1](SPEC.md)). That
+   term is an unverified assumption whose failure mode is silent — it would inflate own
+   capital during every melt, and a positive spike does not trip the drift rules.
+2. **Re-grant after any database recreate** (above).
+3. **Compare the first production `Own capital` against your tracking spreadsheet** — the
+   end-to-end sanity check on the whole chain.
+
+### Known limitation: on-chain reserves
+
+The mint's own on-chain (BDK) wallet balance is currently **derived from CDK's ledger**,
+because CDK does not yet expose the wallet. It therefore verifies internal consistency,
+**not custody** — it cannot detect on-chain funds going missing, and it misses any
+on-chain fee paid outside a melt, so it drifts upward relative to reality. Replace it with
+direct wallet access when CDK exposes one.
+
+> **Any change to what `Reserves` includes creates a step that reads as unexplained drift.**
+> Either backfill history (`backend/scripts/backfill-onchain.mjs`) or record the change as
+> a declared term — never let it land silently in `Remaining delta`.
+
+## Deadman's switch via log analysis
+
+The watchdog emits single-line JSON markers to stdout on every tick, written directly
+rather than through the logger so `LOG_LEVEL` cannot suppress them:
+
+```json
+{"marker":"WATCHDOG_HEARTBEAT_OK","ts":"…","observationId":20,"lnd":"OK","mint":"OK","durationMs":955}
+{"marker":"WATCHDOG_HEARTBEAT_FAIL","ts":"…","detail":"…"}
+```
+
+Configure **two** rules in the log analyser:
+
+| Rule | Match | Severity |
+|---|---|---|
+| **Absence** | no `WATCHDOG_HEARTBEAT_OK` in 15 min (3× the 5-min cadence) | CRITICAL |
+| Presence | any `WATCHDOG_HEARTBEAT_FAIL` | CRITICAL |
+
+> The **absence** rule is the deadman's switch. A crashed, hung or OOM-killed watchdog emits
+> no log line at all — there is no ERROR to match, only silence. The FAIL marker covers what
+> the watchdog is still alive enough to report (tick not persisted, all transports down,
+> uncaught exception); it cannot cover its own death.
+
+## API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness |
+| `GET /api/collector/status` | Recency of last successful read per source |
+| `GET /api/observations/latest` | Most recent observation with all snapshots |
+| `GET /api/observations?from&to&limit` | Full observations over a range |
+| `GET /api/timeseries?hours=` | Compact series for charting |
+| `GET /api/deltas?minutes=` | Change in each term over a window, computed from endpoints |
+| `POST /api/collector/run` | Trigger a tick manually |
+| `GET /api/alerts?status=FIRING\|RESOLVED\|ALL` | Alert states |
+| `GET /api/alerts/events` | Transition and delivery history |
+| `GET /api/rules` | Registered rules and current tuning |
+| `PATCH /api/rules/:ruleId` | Tune thresholds without a redeploy |
+| `POST /api/notify/test` | Exercise every transport individually |
+| `POST /api/heartbeat/test` | Verify the deadman's switch |
+
+Monetary values are msat, serialised as **strings** — msat totals will outgrow a JS double,
+and silently losing precision in the reserve figures is the one failure this tool must not
+have.
+
+> `PATCH /api/rules/:ruleId` is the only way to change a threshold on a running deployment.
+> `RuleConfig` rows are seeded once from code defaults and never updated, so editing a
+> default in source has **no effect** on an existing database.

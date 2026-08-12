@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Introspection output — may contain operational detail about the mint
+mint-introspection.txt
+*-introspection.txt

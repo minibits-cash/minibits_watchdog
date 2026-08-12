@@ -5,6 +5,7 @@
   "license": "MIT",
   "private": true,
   "scripts": {
+    "postinstall": "prisma generate",
     "start:dev": "ts-node-dev --respawn --pretty --transpile-only --project tsconfig.json src/index.ts",
     "build": "tsc --project tsconfig.json --noEmit && esbuild src/index.ts --bundle --platform=node --target=es2022 --format=esm --outdir=dist --packages=external --sourcemap",
     "start:prod": "node dist/index.js",

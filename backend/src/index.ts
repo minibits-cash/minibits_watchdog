@@ -4,7 +4,7 @@ import { buildApp } from './app'
 import { startCollector, stopCollector } from './collector/collector'
 import { log } from './services/logService'
 import prisma from './utils/prismaClient'
-import { setNotifier, Notifier } from './alerts/notifier'
+import { setNotifier, withRedaction, Notifier } from './alerts/notifier'
 import { NtfyNotifier } from './alerts/ntfyNotifier'
 import { EmailNotifier } from './alerts/emailNotifier'
 import { MultiNotifier } from './alerts/multiNotifier'
@@ -18,12 +18,16 @@ process.stderr.write(startupBanner())
 // working delivery.
 const transports: Notifier[] = []
 
+// Redaction is applied per transport here, the single place transports are
+// constructed — so a transport added later cannot quietly skip the policy.
 if (config.notifiers.ntfy) {
-    transports.push(new NtfyNotifier())
+    const ntfy = new NtfyNotifier()
+    transports.push(config.notifiers.redact.ntfy ? withRedaction(ntfy) : ntfy)
 }
 
 if (config.notifiers.email) {
-    transports.push(new EmailNotifier())
+    const email = new EmailNotifier()
+    transports.push(config.notifiers.redact.email ? withRedaction(email) : email)
 }
 
 if (transports.length === 1) {

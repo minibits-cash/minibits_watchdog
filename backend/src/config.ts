@@ -53,6 +53,12 @@ function requiredIf(enabled: boolean, name: string): string {
     return enabled ? required(name) : optional(name)
 }
 
+function boolVar(name: string, fallback: boolean): boolean {
+    const raw = process.env[name]
+    if (raw === undefined || raw.trim() === '') return fallback
+    return raw.trim().toLowerCase() === 'true'
+}
+
 /**
  * Which notification transports are active. Same rationale as ENABLED_SOURCES:
  * a transport's credentials are required only when it is switched on, and
@@ -110,7 +116,7 @@ export const config = {
         ntfy: ntfyEnabled,
         email: emailEnabled,
         /**
-         * Strip numeric amounts from outbound alerts.
+         * Strip numeric amounts from outbound alerts, per transport.
          *
          * Alert text carries reserve figures, channel balances and pending
          * totals. When the transport is a third party — a public ntfy.sh topic,
@@ -118,8 +124,19 @@ export const config = {
          * actionable ("reserve drift, check the dashboard") without publishing
          * the mint's finances. Severity, rule and subject are preserved, so
          * urgency still comes through.
+         *
+         * Set per transport because the exposures genuinely differ: an
+         * unauthenticated public topic is readable by anyone who guesses it,
+         * whereas a mailbox on your own domain is not.
+         *
+         * Both default to TRUE. Disclosure should be a deliberate act, so an
+         * unset or misspelled variable errs toward privacy rather than quietly
+         * publishing the mint's finances.
          */
-        redactAmounts: optional('NOTIFY_REDACT_AMOUNTS', 'false').toLowerCase() === 'true',
+        redact: {
+            ntfy: boolVar('NTFY_REDACT_AMOUNTS', true),
+            email: boolVar('EMAIL_REDACT_AMOUNTS', true),
+        },
     },
 
     ntfy: {
@@ -159,9 +176,13 @@ export function startupBanner(): string {
     if (!config.notifiers.ntfy && !config.notifiers.email) {
         warnings.push('ENABLED_NOTIFIERS is empty — alerts fire and are recorded, but leave the machine nowhere.')
     }
-    if (!config.notifiers.redactAmounts && (config.notifiers.email || config.notifiers.ntfy)) {
+    const unredacted = [
+        config.notifiers.ntfy && !config.notifiers.redact.ntfy ? 'ntfy' : null,
+        config.notifiers.email && !config.notifiers.redact.email ? 'email' : null,
+    ].filter(Boolean)
+    if (unredacted.length > 0) {
         warnings.push(
-            'NOTIFY_REDACT_AMOUNTS is off — alerts carry reserve figures and balances to third-party transports.',
+            `Amounts are NOT redacted for: ${unredacted.join(', ')} — those alerts carry reserve figures and balances.`,
         )
     }
     if (!config.heartbeatUrl) {
@@ -196,7 +217,15 @@ export function startupBanner(): string {
             [config.notifiers.ntfy ? 'ntfy' : null, config.notifiers.email ? 'email' : null]
                 .filter(Boolean)
                 .join(', ') || '(none — log only)'
-        }${config.notifiers.redactAmounts ? '  [amounts redacted]' : ''}`,
+        }`,
+        `  redact amounts   : ${
+            [
+                config.notifiers.ntfy ? `ntfy=${config.notifiers.redact.ntfy}` : null,
+                config.notifiers.email ? `email=${config.notifiers.redact.email}` : null,
+            ]
+                .filter(Boolean)
+                .join('  ') || '(no transports)'
+        }`,
         `  ntfy             : ${config.notifiers.ntfy ? `${config.ntfy.url}/${config.ntfy.topic.slice(0, 6)}…` : '(disabled)'}`,
         `  email            : ${config.notifiers.email ? `${config.email.host}:${config.email.port} → ${config.email.to}` : '(disabled)'}`,
         `  heartbeat        : ${config.heartbeatUrl || '(not configured)'}`,

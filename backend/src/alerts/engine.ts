@@ -281,9 +281,9 @@ async function maybeRenotify(
 
 async function notify(n: Notification, alertStateId: number): Promise<void> {
     try {
-        // Redact once here rather than per transport, so no transport can be
-        // added later that accidentally bypasses it.
-        await getNotifier().send(config.notifiers.redactAmounts ? redactAmounts(n) : n)
+        // Redaction is a property of each transport now (see withRedaction),
+        // because a public topic and a private mailbox are different exposures.
+        await getNotifier().send(n)
     } catch (e: any) {
         // Never swallow: a silent delivery failure is indistinguishable from
         // "no alerts", which is the state we can least afford to misread.

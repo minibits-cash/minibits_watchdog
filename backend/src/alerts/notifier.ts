@@ -26,6 +26,8 @@ export interface Notification {
 
 export interface Notifier {
     readonly name: string
+    /** True when this transport's payloads pass through redaction. */
+    readonly redacted?: boolean
     send(n: Notification): Promise<void>
 }
 
@@ -60,7 +62,8 @@ export class LogNotifier implements Notifier {
  *
  * Severity, rule id and subject survive, so the alert still conveys urgency and
  * points at what to look at; the figures are then read from the dashboard over
- * the SSH tunnel. Enabled with NOTIFY_REDACT_AMOUNTS.
+ * the SSH tunnel. Applied per transport via NTFY_REDACT_AMOUNTS /
+ * EMAIL_REDACT_AMOUNTS — see withRedaction below.
  *
  * Matches digit groups with separators (1,234,567 / 1234567 / 12.5) rather than
  * all digits, so identifiers, counts and timestamps stay intact.
@@ -76,6 +79,27 @@ export function redactAmounts(n: Notification): Notification {
         // Context is stored locally, never transmitted, so it is dropped rather
         // than redacted.
         context: undefined,
+    }
+}
+
+/**
+ * Wrap a transport so its payload is redacted before sending.
+ *
+ * Redaction used to happen once in the engine, which guaranteed no transport
+ * could bypass it. Per-transport policy makes that impossible, so the guarantee
+ * is re-established differently: there is still exactly ONE implementation of
+ * redaction, and it is applied at the single place transports are constructed
+ * (index.ts). A new transport is wired there or it does not run at all.
+ *
+ * `name` deliberately mirrors the wrapped transport, so log lines and
+ * `notify_transport_failed` events stay comparable across a change of setting.
+ * The `redacted` flag carries the distinction instead.
+ */
+export function withRedaction(target: Notifier): Notifier {
+    return {
+        name: target.name,
+        redacted: true,
+        send: (n) => target.send(redactAmounts(n)),
     }
 }
 

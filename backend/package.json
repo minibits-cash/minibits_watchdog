@@ -12,6 +12,7 @@
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "probe:lnd": "esbuild scripts/probe-lnd.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/probe-lnd.js --log-level=warning && node dist/probe-lnd.js",
     "sql": "node scripts/run-sql.mjs",
+    "reset:data": "esbuild scripts/reset-data.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/reset-data.js --log-level=warning && node dist/reset-data.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:updateTypes": "npx prisma generate",

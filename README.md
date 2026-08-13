@@ -129,7 +129,7 @@ Everything is documented inline in `backend/.env.example`. The options most wort
 |---|---|
 | `ENABLED_SOURCES` | `lnd,mint`. Credentials are required only for enabled sources, so disabling is explicit — an accidentally missing macaroon fails loudly instead of silently leaving the node unmonitored. |
 | `ENABLED_NOTIFIERS` | `ntfy,email`. Enabling both gives delivery redundancy: a send succeeds if *any* transport does, and a partial failure is still recorded. |
-| `NOTIFY_REDACT_AMOUNTS` | Strips figures from outbound alerts. Alert text carries reserve amounts and channel balances; public ntfy topics are unauthenticated and SMTP is encrypted hop-by-hop only. Severity and subject survive, so alerts stay actionable. |
+| `NTFY_REDACT_AMOUNTS`, `EMAIL_REDACT_AMOUNTS` | Strip figures from outbound alerts, **per transport** — a public ntfy topic and a mailbox on your own domain are different exposures. Severity and subject survive, so alerts stay actionable. Both default to `true`: disclosure should be deliberate, so an unset variable errs toward privacy. |
 | `COLD_STORAGE_RESERVES` | Operator-declared reserves held outside the node. Changing it is treated as a *declared* movement and excluded from drift — but the window between moving coins and updating it will alert, by design. |
 | `HEARTBEAT_URL` | Optional. Log markers work without it (below). |
 
@@ -145,6 +145,7 @@ Everything is documented inline in `backend/.env.example`. The options most wort
 | `backend/scripts/run-sql.mjs` | Runs a single-statement `.sql` file through the app's own read-only path. |
 | `backend/scripts/probe-lnd.ts` | `npm run probe:lnd` — reads LND through the real collector code path. |
 | `backend/scripts/backfill-onchain.mjs` | One-off. Repairs history after a change to what `Reserves` includes. Dry-run by default. |
+| `backend/scripts/reset-data.ts` | `npm run reset:data` — clear gathered data and/or reseed rule defaults. Dry-run by default. |
 
 ## Before trusting reserve figures in production
 
@@ -213,6 +214,48 @@ Monetary values are msat, serialised as **strings** — msat totals will outgrow
 and silently losing precision in the reserve figures is the one failure this tool must not
 have.
 
-> `PATCH /api/rules/:ruleId` is the only way to change a threshold on a running deployment.
-> `RuleConfig` rows are seeded once from code defaults and never updated, so editing a
-> default in source has **no effect** on an existing database.
+## Editing rule configuration
+
+`RuleConfig` rows are seeded **once** from the code defaults in `backend/src/rules/*.ts`
+and never updated afterwards — deliberately, so the seeding logic can never clobber tuning
+you have done. The consequence is that **editing a default in source has no effect on an
+existing database.**
+
+**On a running deployment — `PATCH /api/rules/:ruleId`:**
+
+```bash
+curl -s http://127.0.0.1:3005/api/rules | jq        # current tuning for all rules
+
+curl -s -X PATCH http://127.0.0.1:3005/api/rules/reserve_drift_short \
+  -H 'content-type: application/json' \
+  -d '{"params": {"toleranceSatPerHour": 50000}}'
+
+curl -s -X PATCH http://127.0.0.1:3005/api/rules/lnd_inactive_channels \
+  -H 'content-type: application/json' -d '{"enabled": false}'
+```
+
+Accepted fields: `enabled`, `severity`, `forEvaluations`, `clearEvaluations`,
+`cooldownSeconds`, `notifyOnResolve`, `params`. Changes take effect on the next tick — no
+restart.
+
+`params` is stored wholesale rather than merged, which is safe because the engine overlays
+stored params on the rule's code defaults at evaluation time. So sending only the keys you
+want to override works; the rest fall back to the defaults.
+
+**For fresh deployments** — edit the rule module. That changes what new databases seed with,
+and nothing else.
+
+**To make changed code defaults apply to an existing database**, reseed the rules while
+leaving the measurement history alone:
+
+```bash
+npm run reset:data -- --yes --rules-only
+```
+
+It truncates `RuleConfig` and immediately reseeds by calling the engine's own `loadConfigs`,
+so what lands in the database is exactly what the app would seed — a reimplementation could
+drift from it silently. It prints the resulting table so you can see what took effect.
+
+This **discards any tuning** done through the API, which is the point: it is a deliberate
+"go back to the defaults in source" action. To re-seed a single rule instead, delete just
+its row and let the next tick recreate it.

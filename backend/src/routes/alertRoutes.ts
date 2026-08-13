@@ -47,9 +47,14 @@ export async function alertRoutes(app: FastifyInstance) {
             targets.map(async (t) => {
                 try {
                     await t.send(message)
-                    return { transport: t.name, delivered: true as const }
+                    return { transport: t.name, redacted: t.redacted === true, delivered: true as const }
                 } catch (e: any) {
-                    return { transport: t.name, delivered: false as const, error: String(e?.message ?? e) }
+                    return {
+                        transport: t.name,
+                        redacted: t.redacted === true,
+                        delivered: false as const,
+                        error: String(e?.message ?? e),
+                    }
                 }
             }),
         )
@@ -65,7 +70,6 @@ export async function alertRoutes(app: FastifyInstance) {
 
         return res.code(failed.length === results.length ? 502 : 200).send({
             delivered: failed.length < results.length,
-            redactAmounts: config.notifiers.redactAmounts,
             results,
         })
     })
@@ -120,6 +124,7 @@ export async function alertRoutes(app: FastifyInstance) {
                     forEvaluations: c?.forEvaluations,
                     clearEvaluations: c?.clearEvaluations,
                     cooldownSeconds: c?.cooldownSeconds,
+                    notifyOnResolve: c?.notifyOnResolve,
                     params: c?.params,
                 }
             }),
@@ -138,6 +143,7 @@ export async function alertRoutes(app: FastifyInstance) {
                     forEvaluations: number
                     clearEvaluations: number
                     cooldownSeconds: number
+                    notifyOnResolve: boolean
                     params: Record<string, unknown>
                 }>
             }>,
@@ -159,6 +165,10 @@ export async function alertRoutes(app: FastifyInstance) {
                     forEvaluations: req.body.forEvaluations,
                     clearEvaluations: req.body.clearEvaluations,
                     cooldownSeconds: req.body.cooldownSeconds,
+                    notifyOnResolve: req.body.notifyOnResolve,
+                    // Replaced wholesale, not merged — safe because the engine
+                    // overlays stored params on the rule's code defaults, so a
+                    // partial object overrides only the keys it names.
                     params: req.body.params as any,
                 },
             })

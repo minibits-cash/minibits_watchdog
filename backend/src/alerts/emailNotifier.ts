@@ -12,7 +12,7 @@ import type { Severity } from '@prisma/client'
  *
  *  1. **SMTP is encrypted hop-by-hop, not end to end.** The destination mailbox
  *     provider sees plaintext. Where that provider is a third party, set
- *     NOTIFY_REDACT_AMOUNTS so alerts carry urgency without the mint's figures.
+ *     EMAIL_REDACT_AMOUNTS so alerts carry urgency without the mint's figures.
  *
  *  2. **Delivery success is not the same as being read.** SMTP returns 250
  *     Accepted and the message can still be filed as spam. That is a silent

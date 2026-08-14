@@ -193,7 +193,7 @@ export default function Dashboard() {
           deltaTone={capitalDelta?.tone ?? 'neutral'}
           hint={
             change && Math.abs(change.unclaimed) > MATERIAL_SAT && capitalDelta?.tone !== 'neutral'
-              ? `${signed(change.unclaimed)} of it in unclaimed`
+              ? `${signed(change.unclaimed)} in unclaimed`
               : undefined
           }
         />

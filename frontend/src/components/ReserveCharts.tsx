@@ -128,6 +128,33 @@ const TIME_AXIS_PROPS = {
   ...axisProps,
 }
 
+/**
+ * A y-domain that follows the data rather than anchoring at zero.
+ *
+ * These are all large, slow-moving balances. Anchored at zero, a day's movement
+ * is a few pixels of a tall column and every line reads as flat — the chart shows
+ * magnitude, which is already in the KPI tiles, and hides the trend, which is the
+ * only thing a chart adds.
+ *
+ * Zero is not dropped unconditionally, though. It is the solvency boundary, so it
+ * is forced back into view once the data comes near it: a suppressed axis that
+ * crops out the very line being approached would be worse than a flat one. The
+ * test keys off the SMALLEST series, since that is what reaches zero first.
+ */
+function valueDomain(values: (number | null)[]): {
+  domain: [number | 'auto', 'auto']
+  nearZero: boolean
+} {
+  const present = values.filter((v): v is number => v !== null)
+  if (present.length === 0) return { domain: ['auto', 'auto'], nearZero: false }
+
+  const min = Math.min(...present)
+  const max = Math.max(...present)
+  const nearZero = min < Math.abs(max) * 0.25
+
+  return { domain: nearZero ? [0, 'auto'] : ['auto', 'auto'], nearZero }
+}
+
 function ChartTooltip({
   active,
   payload,
@@ -186,6 +213,13 @@ const endDot = (color: string) => ({
  */
 export function ReservesVsEcashChart({ rows }: { rows: Row[] }) {
   const series = { reserves: 'Reserves', ecashIssued: 'Ecash issued' }
+
+  // Keyed off `ecashIssued` alone: reserves exceed it by own capital, so it is
+  // always the lower line. Reserves approaching zero is a different failure from
+  // the one this chart is for — here the meaningful boundary is the two lines
+  // CROSSING, which is visible without an axis anchored at zero.
+  const { domain } = valueDomain(rows.map((r) => r.ecashIssued))
+
   return (
     <>
       {/* Legend is always present for ≥2 series, so identity is never colour-alone. */}
@@ -211,7 +245,7 @@ export function ReservesVsEcashChart({ rows }: { rows: Row[] }) {
         <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 16, left: 8 }}>
           <CartesianGrid {...GRID_PROPS} />
           <XAxis {...TIME_AXIS_PROPS} />
-          <YAxis tickFormatter={compact} width={52} {...axisProps} />
+          <YAxis tickFormatter={compact} width={52} domain={domain} {...axisProps} />
           <Tooltip
             content={<ChartTooltip series={series} />}
             cursor={{ stroke: 'var(--viz-axis)', strokeWidth: 1 }}
@@ -249,10 +283,8 @@ export function ReservesVsEcashChart({ rows }: { rows: Row[] }) {
  */
 export function OwnCapitalChart({ rows }: { rows: Row[] }) {
   const series = { ownCapital: 'Own capital', ownCapitalNet: 'Net of unclaimed' }
-  const values = rows.map((r) => r.ownCapitalNet).filter((v): v is number => v !== null)
-  const min = values.length ? Math.min(...values) : 0
-  const max = values.length ? Math.max(...values) : 0
-  const nearZero = values.length > 0 && min < Math.abs(max) * 0.25
+  // Keyed off the NET line — the lower of the two, so it reaches zero first.
+  const { domain, nearZero } = valueDomain(rows.map((r) => r.ownCapitalNet))
 
   return (
     <>
@@ -282,7 +314,7 @@ export function OwnCapitalChart({ rows }: { rows: Row[] }) {
           <YAxis
             tickFormatter={compact}
             width={52}
-            domain={nearZero ? [0, 'auto'] : ['auto', 'auto']}
+            domain={domain}
             {...axisProps}
           />
           <Tooltip

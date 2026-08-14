@@ -86,6 +86,7 @@ yarn typecheck       # typecheck both
 
 yarn start:backend           # or start:frontend
 yarn dev                     # both in watch mode, one terminal
+yarn dev:stop                # stop whatever this repo has running locally
 
 yarn reset:data --yes --rules-only    # args pass through, no `--` needed
 yarn sql ../scripts/verify-mint-light.sql
@@ -94,6 +95,11 @@ yarn probe:lnd
 
 Arguments are forwarded through both yarn levels, so unlike npm no `--` separator is
 required. `yarn setup` is available as an explicit alias for the install step.
+
+`dev:stop` matches on two conditions together — the process is a node runtime running one
+of this project's entrypoints, **and** its working directory is inside this repository. It
+deliberately does not kill by port: on a dev machine the production ports are held by the
+SSH tunnel, so a port-based kill would drop the tunnel and make production look down.
 
 In production run the two processes under separate service units rather than `yarn dev`,
 so each can be restarted and logged independently.

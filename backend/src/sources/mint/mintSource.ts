@@ -65,6 +65,16 @@ export interface MintUnitReading {
     keysetsTotal: number
     keysetBreakdown: KeysetRow[]
     unclaimedMintQuotes: bigint
+    /**
+     * The on-chain share of `unclaimedMintQuotes`. A breakdown, not a term to add:
+     * it is already inside the total above.
+     *
+     * Read from `mint_quote.amount_paid − amount_issued` over the known on-chain
+     * quotes, whereas the total comes from the append-only ledger tables. Two
+     * sources for the same money, so the Lightning share is the remainder rather
+     * than a third measurement — see the panel that renders it.
+     */
+    unclaimedOnchain: bigint
     overIssuedMintQuotes: bigint
     /** Ledger-derived on-chain reserves. Interim until CDK exposes the BDK wallet. */
     onchainBalance: bigint
@@ -218,6 +228,15 @@ export class MintSource implements Source<MintReading> {
         const unclaimed = netUnclaimed > 0n ? netUnclaimed : 0n
         const overIssued = netUnclaimed < 0n ? -netUnclaimed : 0n
 
+        // The on-chain share of the same figure. `unclaimed` above spans BOTH
+        // payment methods — the ledger tables have no payment_method column — so
+        // this exists to say how much of it arrived on-chain rather than over
+        // Lightning. Clamped for the same reason as the total: a negative value
+        // would mean ecash issued against an unpaid quote, which overIssued
+        // reports as an integrity failure instead of quietly netting off here.
+        const onchainNetUnclaimed = onchain.paid - onchain.issued
+        const onchainUnclaimed = onchainNetUnclaimed > 0n ? onchainNetUnclaimed : 0n
+
         const t = transient.rows[0] ?? {}
 
         const byUnit = new Map<string, MintUnitReading>()
@@ -240,6 +259,8 @@ export class MintSource implements Source<MintReading> {
                 // attributed to the backing unit. Correct while the mint is
                 // sat-only; revisit if CDK gains multi-unit quotes.
                 unclaimedMintQuotes: row.unit === config.backingUnit ? satToMsat(unclaimed) : 0n,
+                unclaimedOnchain:
+                    row.unit === config.backingUnit ? satToMsat(onchainUnclaimed) : 0n,
                 overIssuedMintQuotes: row.unit === config.backingUnit ? satToMsat(overIssued) : 0n,
                 // Like unclaimed, the on-chain ledger carries no unit column, so
                 // it is attributed to the backing unit. Correct while the mint is

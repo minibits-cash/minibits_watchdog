@@ -86,16 +86,21 @@ export function ReconciliationPanel({
         />
 
         {/*
-          Not an arithmetic term — these sats ARE inside Reserves. The Lightning
-          payment landed, so the mint holds them; what has not happened is the
-          issuance of the ecash they were paid for. Shown as an encumbrance so it
-          reads as "part of the above is spoken for" rather than as another line
-          to add or subtract.
+          Not an arithmetic term — these sats ARE inside Reserves. The payment
+          landed, so the mint holds them; what has not happened is the issuance of
+          the ecash they were paid for. Shown as an encumbrance so it reads as
+          "part of the above is spoken for" rather than as another line to add or
+          subtract.
+
+          Covers BOTH payment methods. The total is ledger-derived (the ledger
+          tables have no payment_method column), while the on-chain share comes
+          from mint_quote — so the Lightning figure is stated as the remainder
+          rather than measured separately, and cannot disagree with the total.
         */}
         <OfWhich
           label="of which unclaimed"
           value={r.unclaimed}
-          note="paid on Lightning, ecash not yet issued"
+          note={unclaimedSplit(r.unclaimed, mint?.unclaimedOnchain)}
         />
 
         <Term
@@ -284,6 +289,34 @@ function SubRow({
  * cannot be misread as something to add or subtract. It marks a portion of the
  * value above that is already committed.
  */
+/**
+ * Splits unclaimed into its two payment methods for the note line.
+ *
+ * On-chain is the measured half and Lightning is the remainder, because the two
+ * numbers come from different places in CDK: the total from the append-only
+ * ledger tables, the on-chain share from `mint_quote`. Deriving Lightning by
+ * subtraction keeps the parts summing to the displayed total even if those two
+ * sources disagree — with the residue landing on Lightning, where a discrepancy
+ * is at least visible, rather than silently splitting the difference.
+ *
+ * Degrades to the unsplit wording when the mint snapshot is missing, which is
+ * the case whenever the mint source failed but a reconciliation still exists
+ * from an earlier tick.
+ */
+function unclaimedSplit(total: string, onchain: string | null | undefined): string {
+  const base = 'paid but ecash not yet issued'
+  if (onchain === null || onchain === undefined) return base
+
+  const chain = BigInt(onchain)
+  const ln = BigInt(total) - chain
+
+  // Only ever one method in play — no point naming a split that is 0 / everything.
+  if (chain === 0n) return `${base} · all on Lightning`
+  if (ln <= 0n) return `${base} · all on-chain`
+
+  return `${base} · Lightning ${formatSat(ln.toString())} · on-chain ${formatSat(onchain)}`
+}
+
 function OfWhich({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1 pl-7 text-xs">

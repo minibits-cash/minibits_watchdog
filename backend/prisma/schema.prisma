@@ -119,6 +119,13 @@ model MintSnapshot {
   // would assert "none" where we mean "not measured".
   unclaimedMintQuotes      BigInt
   unclaimedMintQuotesCount Int?
+  /// On-chain share of unclaimedMintQuotes — already inside it, not an extra term.
+  /// From mint_quote.amount_paid − amount_issued; the total is ledger-derived, as
+  /// the ledger tables carry no payment_method column.
+  /// Nullable for the same reason as the count above: rows written before this was
+  /// collected must read "not measured", not "none on-chain" — otherwise the
+  /// dashboard would assert "all on Lightning" off a backfilled default.
+  unclaimedOnchain         BigInt?
   /// amount_issued > amount_paid: ecash issued against an unpaid quote. Must be 0.
   overIssuedMintQuotes     BigInt
 

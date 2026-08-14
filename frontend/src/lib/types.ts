@@ -47,6 +47,12 @@ export interface MintSnapshot {
   onchainWithdrawn: Msat
   onchainQuotes: number
   unclaimedMintQuotes: Msat
+  /**
+   * On-chain share of unclaimedMintQuotes. Already inside it — a breakdown, not a
+   * term. Null on observations recorded before it was collected: not measured,
+   * which is not the same as none.
+   */
+  unclaimedOnchain: Msat | null
   overIssuedMintQuotes: Msat
   pendingMeltQuotes: Msat
   sagasInFlight: number

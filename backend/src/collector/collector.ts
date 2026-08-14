@@ -184,6 +184,7 @@ function toMintSnapshot(u: MintReading['units'][number]) {
         proofsPendingCount: u.proofsPendingCount,
         unclaimedMintQuotes: u.unclaimedMintQuotes,
         unclaimedMintQuotesCount: null, // ledger tables carry amounts, not quote counts
+        unclaimedOnchain: u.unclaimedOnchain,
         overIssuedMintQuotes: u.overIssuedMintQuotes,
         pendingMeltQuotes: u.pendingMeltQuotes,
         pendingMeltQuotesCount: u.pendingMeltQuotesCount,

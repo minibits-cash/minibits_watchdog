@@ -6,10 +6,16 @@ import type {
   TimeseriesPoint,
 } from './types'
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3005'
-
+/**
+ * Relative paths only. Next rewrites /api/* to the backend (see next.config.mjs),
+ * so the browser never needs to know the API's address — which means it is not
+ * baked into this bundle at build time and can be changed with a restart.
+ *
+ * Safe because every fetch here runs in an effect, i.e. client-side, where a
+ * relative URL resolves against the page origin.
+ */
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
+  const res = await fetch(path)
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText} for ${path}`)
   }

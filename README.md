@@ -84,7 +84,15 @@ npm run start:dev
 cd frontend
 cp .env.example .env.local
 npm install
-npm run build && npm run start    # http://localhost:3006
+npm run build
+npm run start                     # http://localhost:3006
+```
+
+`PORT` and `BACKEND_URL` are both read at server start, so a second instance
+alongside a tunnelled production one needs no rebuild:
+
+```bash
+PORT=3016 BACKEND_URL=http://127.0.0.1:3015 npm run start
 ```
 
 ### Mint database role
@@ -118,8 +126,17 @@ Both processes bind to loopback. The dashboard has no authentication by design �
 over an SSH tunnel:
 
 ```bash
-ssh -L 3006:127.0.0.1:3006 -L 3005:127.0.0.1:3005 <host>
+ssh -L 3006:127.0.0.1:3006 <host>
 ```
+
+**One port.** The dashboard proxies `/api/*` to the backend server-side
+(`frontend/src/pages/api/[...path].ts`), so the browser never contacts the API
+directly — no second tunnel, and no CORS in the browser path.
+
+The proxy is a route handler rather than a `rewrites()` entry on purpose:
+`rewrites()` is evaluated at **build** time and baked into `routes-manifest.json`,
+so it cannot be retargeted by restart. A route handler reads `BACKEND_URL` per
+request.
 
 ## Configuration highlights
 
@@ -132,6 +149,13 @@ Everything is documented inline in `backend/.env.example`. The options most wort
 | `NTFY_REDACT_AMOUNTS`, `EMAIL_REDACT_AMOUNTS` | Strip figures from outbound alerts, **per transport** — a public ntfy topic and a mailbox on your own domain are different exposures. Severity and subject survive, so alerts stay actionable. Both default to `true`: disclosure should be deliberate, so an unset variable errs toward privacy. |
 | `COLD_STORAGE_RESERVES` | Operator-declared reserves held outside the node. Changing it is treated as a *declared* movement and excluded from drift — but the window between moving coins and updating it will alert, by design. |
 | `HEARTBEAT_URL` | Optional. Log markers work without it (below). |
+
+Frontend (`frontend/.env.local`), both read at server start — restart, no rebuild:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `3006` | Dashboard port |
+| `BACKEND_URL` | `http://127.0.0.1:3005` | Where `/api/*` is proxied |
 
 ## Scripts
 

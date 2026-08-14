@@ -217,6 +217,62 @@ export const meltRequestsStuck: Rule = {
     },
 }
 
+/**
+ * An on-chain melt still committed past the window in which the watchdog trusts
+ * it as a wallet-balance correction.
+ *
+ * This is the alert half of a deliberate trade. Inside the window a committed
+ * melt is subtracted from on-chain reserves, because its transaction has left
+ * the BDK wallet. Past it, the transaction may instead have been dropped — which
+ * returns the funds — so the collector stops subtracting and reports it here.
+ * Either way the on-chain reserve figure is no longer trustworthy while this
+ * fires, which is precisely when a human should look rather than a heuristic
+ * guess.
+ *
+ * State-style, so it resolves: unlike a collection gap, "the melt is no longer
+ * stuck" is information — it says the reserve figure can be trusted again.
+ */
+export const onchainMeltStuck: Rule = {
+    id: 'mint_onchain_melt_stuck',
+    description: 'On-chain melt committed but unsettled beyond the trust window',
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 2,
+        clearEvaluations: 2,
+        cooldownSeconds: 21600,
+        notifyOnResolve: true,
+    },
+    async evaluate({ observation }) {
+        const findings: RuleFinding[] = []
+
+        if (!observation.mints?.length) return null
+
+        for (const m of observation.mints) {
+            // Null means the collector predates this measurement — not evaluable,
+            // which must not read as "none stuck".
+            if (m.onchainInflightStaleCount === null) return null
+            if (m.onchainInflightStaleCount === 0) continue
+
+            const hours = Math.floor((m.onchainInflightOldestSec ?? 0) / 3600)
+            findings.push({
+                dedupeKey: m.unit,
+                title: `${m.onchainInflightStaleCount} on-chain melt(s) unsettled for over ${hours}h`,
+                detail:
+                    `${formatSat(BigInt(m.onchainInflightStale ?? 0))} sat committed and no longer ` +
+                    `subtracted from on-chain reserves, so that figure may be overstated by up to ` +
+                    `that amount. Check whether the transaction confirmed, was dropped, or is still ` +
+                    `in the mempool.`,
+                context: {
+                    unit: m.unit,
+                    staleCount: m.onchainInflightStaleCount,
+                    oldestSec: m.onchainInflightOldestSec,
+                },
+            })
+        }
+        return findings
+    },
+}
+
 export const mintRules = [
     mintUnreachable,
     mintOverIssued,
@@ -224,4 +280,5 @@ export const mintRules = [
     mintKeysetChange,
     proofsPendingHigh,
     meltRequestsStuck,
+    onchainMeltStuck,
 ]

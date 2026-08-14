@@ -169,6 +169,40 @@ export const ONCHAIN_MELT_MAX_TS = `
 `
 
 /**
+ * On-chain melts committed but not yet completed.
+ *
+ * These have left the BDK wallet already — the transaction is broadcast — but
+ * `completed_operations` has no row until settlement, so the deposits-minus-
+ * completions estimate above still counts them as reserves. On Lightning the
+ * equivalent correction is free: the outgoing HTLC leaves `local_balance` the
+ * moment it is sent, so LND's measurement reflects it natively. This query is
+ * what gives the on-chain rail the same behaviour.
+ *
+ * Subtracts `amount + fee_reserve`, which is exactly `melt_request.inputs_amount`
+ * — the proof total that `+ proofsPending` adds back — so the two cancel and own
+ * capital stays flat across the whole melt. Measured against a real melt:
+ * inputs 801,828 = payout 800,000 + actual fee 1,034 + ecash change 794.
+ *
+ * The actual miner fee is fixed at broadcast, but CDK persists it only in
+ * `completed_operations.payment_fee` after settlement, so `fee_reserve` is the
+ * in-flight upper bound. It understates the wallet by the change that returns.
+ *
+ * $1 = age cutoff. Older rows are reported separately rather than subtracted:
+ * a dropped transaction returns the funds to the wallet, which would make the
+ * correction a permanent understatement. Index: melt_quote_state_index.
+ */
+export const ONCHAIN_MELT_INFLIGHT = `
+    SELECT coalesce(sum(amount + fee_reserve) FILTER (WHERE created_time > $1::bigint), 0)::bigint  AS committed,
+           count(*) FILTER (WHERE created_time > $1::bigint)::int                                    AS n,
+           coalesce(sum(amount + fee_reserve) FILTER (WHERE created_time <= $1::bigint), 0)::bigint AS stale,
+           count(*) FILTER (WHERE created_time <= $1::bigint)::int                                   AS stale_n,
+           coalesce(min(created_time), 0)::bigint                                                    AS oldest_created
+    FROM melt_quote
+    WHERE state = 'PENDING'
+      AND payment_method = 'onchain'
+`
+
+/**
  * Permission and schema self-check. Catalog-only, no heap access.
  *
  * A CDK migration that adds a table the watchdog cannot read is a silent blind

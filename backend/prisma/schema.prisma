@@ -147,6 +147,19 @@ model MintSnapshot {
   onchainWithdrawn BigInt @default(0)
   onchainQuotes    Int    @default(0)
 
+  /// Committed-but-unsettled on-chain melts, ALREADY subtracted from onchainBalance.
+  /// Part of the wallet-balance estimate, not a reconciliation term: the outgoing
+  /// tx has left the wallet but completed_operations has no row until settlement.
+  /// Lightning needs no equivalent — LND's local_balance drops at HTLC send.
+  /// Nullable: rows written before this was collected are "not measured", not zero.
+  onchainInflight           BigInt?
+  onchainInflightCount      Int?
+  /// In flight beyond INFLIGHT_MELT_MAX_AGE_SEC — reported, NOT subtracted.
+  onchainInflightStale      BigInt?
+  onchainInflightStaleCount Int?
+  /// Age of the oldest in-flight on-chain melt, seconds. Drives the stuck-melt rule.
+  onchainInflightOldestSec  Int?
+
   keysetsActive Int
   keysetsTotal  Int
 

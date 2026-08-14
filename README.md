@@ -220,6 +220,26 @@ because CDK does not yet expose the wallet. It therefore verifies internal consi
 on-chain fee paid outside a melt, so it drifts upward relative to reality. Replace it with
 direct wallet access when CDK exposes one.
 
+**In-flight melts are corrected for.** A committed on-chain melt has left the wallet at
+broadcast, but `completed_operations` gets no row until settlement — so the estimate
+subtracts `melt_quote.amount + fee_reserve` for melts still `PENDING`. Lightning needs no
+such correction: LND's `local_balance` drops the moment the HTLC is sent, which is the
+whole reason the two rails behaved differently. The subtracted quantity equals
+`melt_request.inputs_amount`, exactly what `+ Proofs pending` adds back, so own capital
+stays flat across the melt. Measured on a real 800,000 sat melt: without it, own capital
+spiked +801,828 for 26 minutes and fell back; with it, the step is 63 sat.
+
+Melts in flight longer than `INFLIGHT_MELT_MAX_AGE_SEC` (24h) are **not** subtracted —
+a dropped transaction returns the funds, which would make the correction a permanent
+understatement. Those raise `mint_onchain_melt_stuck` instead, because while one is
+outstanding the on-chain figure may be overstated by up to that amount.
+
+> When CDK exposes BDK directly, **remove this correction** — the real wallet already
+> reflects broadcast spends, so keeping it would double-count. Prefer BDK's *confirmed*
+> balance: `mint_quote.amount_paid` is set at 1 confirmation, and a total including 0-conf
+> deposits would raise reserves before `Unclaimed` rises, producing the mirror-image
+> false drift on the incoming side.
+
 > **Any change to what `Reserves` includes creates a step that reads as unexplained drift.**
 > Either backfill history (`backend/scripts/backfill-onchain.mjs`) or record the change as
 > a declared term — never let it land silently in `Remaining delta`.

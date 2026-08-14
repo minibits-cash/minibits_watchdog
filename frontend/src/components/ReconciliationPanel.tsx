@@ -80,6 +80,26 @@ export function ReconciliationPanel({
                       : 'ledger-derived, interim'
                   }
                 />
+                {/*
+                  Shown as already-applied, not as a term to subtract: it is part
+                  of the wallet-balance estimate above. Lightning has no
+                  counterpart because LND's local_balance drops at HTLC send.
+                */}
+                {mint?.onchainInflight && BigInt(mint.onchainInflight) > 0n ? (
+                  <SubRow
+                    label="↳ less on-chain melts in flight"
+                    value={mint.onchainInflight}
+                    muted
+                    note={`${mint.onchainInflightCount} broadcast, unsettled · already deducted above`}
+                  />
+                ) : null}
+                {mint?.onchainInflightStale && BigInt(mint.onchainInflightStale) > 0n ? (
+                  <SubRow
+                    label="↳ stuck beyond trust window"
+                    value={mint.onchainInflightStale}
+                    note={`${mint.onchainInflightStaleCount} melt(s) · NOT deducted — figure may be overstated`}
+                  />
+                ) : null}
               </>
             ) : null
           }

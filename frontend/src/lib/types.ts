@@ -45,6 +45,13 @@ export interface MintSnapshot {
   onchainBalance: Msat
   onchainDeposits: Msat
   onchainWithdrawn: Msat
+  /** Committed-but-unsettled on-chain melts. Already subtracted from onchainBalance. */
+  onchainInflight: Msat | null
+  onchainInflightCount: number | null
+  /** In flight beyond the trust window — reported, not subtracted. */
+  onchainInflightStale: Msat | null
+  onchainInflightStaleCount: number | null
+  onchainInflightOldestSec: number | null
   onchainQuotes: number
   unclaimedMintQuotes: Msat
   /**

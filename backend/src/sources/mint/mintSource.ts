@@ -14,6 +14,7 @@ import {
     ONCHAIN_QUOTE_DISCOVERY,
     ONCHAIN_PAID_SUM,
     ONCHAIN_MELT_OUT,
+    ONCHAIN_MELT_INFLIGHT,
     ledgerSum,
     ledgerMaxId,
 } from './mintQueries'
@@ -39,6 +40,21 @@ const OUT_LAG_SEC = 3600n
  * days of slack, and re-reading it costs a small PK range scan.
  */
 const LEDGER_OVERLAP = 5000n
+
+/**
+ * How long a committed on-chain melt is still trusted as a wallet-balance
+ * correction.
+ *
+ * Inside the window the transaction is presumed in the mempool or confirming,
+ * so the funds really have left the wallet and subtracting them is right.
+ * Beyond it the transaction may have been dropped, which returns the funds and
+ * would turn the correction into a permanent understatement — so older ones are
+ * surfaced for a human instead of being netted away silently.
+ *
+ * 24h against an observed settlement time of 26 minutes: generous enough that a
+ * congested mempool is not mistaken for a stuck melt.
+ */
+export const INFLIGHT_MELT_MAX_AGE_SEC = 86_400n
 
 export interface KeysetRow {
     keysetId: string
@@ -80,6 +96,23 @@ export interface MintUnitReading {
     onchainBalance: bigint
     onchainDeposits: bigint
     onchainWithdrawn: bigint
+    /**
+     * Committed-but-uncompleted on-chain melts, already subtracted from
+     * onchainBalance. Not an identity term — it is part of the wallet-balance
+     * ESTIMATE, which is why it disappears by itself once CDK exposes BDK: the
+     * real wallet already reflects broadcast spends, exactly as LND does.
+     */
+    onchainInflight: bigint
+    onchainInflightCount: number
+    /**
+     * In-flight beyond INFLIGHT_MELT_MAX_AGE_SEC. Reported but NOT subtracted:
+     * past that age the transaction may have been dropped, which returns the
+     * funds to the wallet and would make the correction permanently wrong.
+     */
+    onchainInflightStale: bigint
+    onchainInflightStaleCount: number
+    /** Age of the oldest in-flight on-chain melt, seconds. 0 when none. */
+    onchainInflightOldestSec: number
     onchainQuotes: number
     sagasInFlight: number
     meltRequestsInFlight: number
@@ -266,9 +299,21 @@ export class MintSource implements Source<MintReading> {
                 // it is attributed to the backing unit. Correct while the mint is
                 // sat-only.
                 onchainBalance:
-                    row.unit === config.backingUnit ? satToMsat(onchain.paid - onchain.out) : 0n,
+                    row.unit === config.backingUnit
+                        ? satToMsat(onchain.paid - onchain.out - onchain.inflight)
+                        : 0n,
                 onchainDeposits: row.unit === config.backingUnit ? satToMsat(onchain.paid) : 0n,
                 onchainWithdrawn: row.unit === config.backingUnit ? satToMsat(onchain.out) : 0n,
+                onchainInflight:
+                    row.unit === config.backingUnit ? satToMsat(onchain.inflight) : 0n,
+                onchainInflightCount:
+                    row.unit === config.backingUnit ? onchain.inflightCount : 0,
+                onchainInflightStale:
+                    row.unit === config.backingUnit ? satToMsat(onchain.inflightStale) : 0n,
+                onchainInflightStaleCount:
+                    row.unit === config.backingUnit ? onchain.inflightStaleCount : 0,
+                onchainInflightOldestSec:
+                    row.unit === config.backingUnit ? onchain.inflightOldestSec : 0,
                 onchainQuotes: row.unit === config.backingUnit ? onchain.quotes : 0,
                 sagasInFlight: Number(t.sagas ?? 0),
                 meltRequestsInFlight: Number(t.melt_requests ?? 0),
@@ -327,6 +372,11 @@ export class MintSource implements Source<MintReading> {
         paid: bigint
         issued: bigint
         out: bigint
+        inflight: bigint
+        inflightCount: number
+        inflightStale: bigint
+        inflightStaleCount: number
+        inflightOldestSec: number
         quotes: number
         melts: number
     }> {
@@ -405,7 +455,30 @@ export class MintSource implements Source<MintReading> {
         outTotal += BigInt(tail.rows[0]?.out_total ?? 0)
         melts += Number(tail.rows[0]?.n ?? 0)
 
-        return { paid, issued, out: outTotal, quotes: ids.length, melts }
+        // ── In-flight: broadcast but not yet settled ────────────────────────
+        // Not watermarked. This is a live set, not an append-only ledger — rows
+        // leave it when the melt completes — so it must be re-read whole each
+        // tick rather than accumulated.
+        const inflightCutoff =
+            nowSec > INFLIGHT_MELT_MAX_AGE_SEC ? nowSec - INFLIGHT_MELT_MAX_AGE_SEC : 0n
+        const inflightRes = await pool.query(ONCHAIN_MELT_INFLIGHT, [inflightCutoff.toString()])
+        const f = (inflightRes.rows[0] ?? {}) as any
+
+        const oldestCreated = BigInt(f.oldest_created ?? 0)
+        const inflightOldestSec = oldestCreated > 0n ? Number(nowSec - oldestCreated) : 0
+
+        return {
+            paid,
+            issued,
+            out: outTotal,
+            inflight: BigInt(f.committed ?? 0),
+            inflightCount: Number(f.n ?? 0),
+            inflightStale: BigInt(f.stale ?? 0),
+            inflightStaleCount: Number(f.stale_n ?? 0),
+            inflightOldestSec,
+            quotes: ids.length,
+            melts,
+        }
     }
 
     /**

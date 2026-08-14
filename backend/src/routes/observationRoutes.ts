@@ -43,34 +43,47 @@ export async function observationRoutes(app: FastifyInstance) {
      * Separate from /observations because that returns every raw source payload
      * per row — hundreds of kB for a day of points, nearly all of it unplotted.
      */
-    app.get('/timeseries', async (req: FastifyRequest<{ Querystring: { hours?: string } }>) => {
-        const hours = Math.min(parseInt(req.query.hours ?? '24', 10) || 24, 24 * 90)
-        const from = new Date(Date.now() - hours * 3_600_000)
+    app.get(
+        '/timeseries',
+        async (req: FastifyRequest<{ Querystring: { hours?: string; minutes?: string } }>) => {
+            // `minutes` is the precise form and takes precedence; `hours` is kept
+            // for callers that predate the shared range control. Hours alone could
+            // not express the short end of that control at all — parseInt('0.08')
+            // is 0, which fell through to the 24h default and silently plotted a
+            // day when five minutes was asked for.
+            const minutes = req.query.minutes
+                ? Math.min(parseInt(req.query.minutes, 10) || 60, 60 * 24 * 90)
+                : Math.min(parseInt(req.query.hours ?? '24', 10) || 24, 24 * 90) * 60
 
-        const rows = await prisma.reconciliation.findMany({
-            where: { observation: { observedAt: { gte: from } } },
-            orderBy: { id: 'asc' },
-            include: { observation: { select: { observedAt: true } } },
-        })
+            const hours = minutes / 60
+            const from = new Date(Date.now() - minutes * 60_000)
 
-        return {
-            from,
-            hours,
-            count: rows.length,
-            points: rows.map((r) => ({
-                t: r.observation.observedAt,
-                unit: r.unit,
-                totalNodeBalance: r.totalNodeBalance,
-                coldStorage: r.coldStorage,
-                mintOnchain: r.mintOnchain,
-                mintBalance: r.mintBalance,
-                proofsPending: r.proofsPending,
-                ownCapital: r.ownCapital,
-                unclaimed: r.unclaimed,
-                remainingDelta: r.remainingDelta,
-            })),
-        }
-    })
+            const rows = await prisma.reconciliation.findMany({
+                where: { observation: { observedAt: { gte: from } } },
+                orderBy: { id: 'asc' },
+                include: { observation: { select: { observedAt: true } } },
+            })
+
+            return {
+                from,
+                hours,
+                minutes,
+                count: rows.length,
+                points: rows.map((r) => ({
+                    t: r.observation.observedAt,
+                    unit: r.unit,
+                    totalNodeBalance: r.totalNodeBalance,
+                    coldStorage: r.coldStorage,
+                    mintOnchain: r.mintOnchain,
+                    mintBalance: r.mintBalance,
+                    proofsPending: r.proofsPending,
+                    ownCapital: r.ownCapital,
+                    unclaimed: r.unclaimed,
+                    remainingDelta: r.remainingDelta,
+                })),
+            }
+        },
+    )
 
     /**
      * Change in the reconciliation terms over a window.
@@ -127,6 +140,16 @@ export async function observationRoutes(app: FastifyInstance) {
         const deltaColdStorage = last.coldStorage - first.coldStorage
         const deltaMintFees = last.mintFeesCollected - first.mintFeesCollected
 
+        // The asset and liability sides of the same window. Served from here
+        // rather than differenced in the browser so every "what changed over N"
+        // on the page — tiles, cards, rules — resolves to one computation over
+        // one pair of endpoints. Two views disagreeing by a rounding step would
+        // undermine the whole point of the dashboard.
+        const reservesOf = (r: typeof first) => r.totalNodeBalance + r.coldStorage + r.mintOnchain
+        const deltaReserves = reservesOf(last) - reservesOf(first)
+        const deltaEcashIssued = last.mintBalance - first.mintBalance
+        const deltaProofsPending = last.proofsPending - first.proofsPending
+
         return {
             minutes,
             samples: rows.length,
@@ -141,6 +164,9 @@ export async function observationRoutes(app: FastifyInstance) {
                 coldStorage: deltaColdStorage,
                 mintFees: deltaMintFees,
                 remaining: deltaOwnCapital - deltaUnclaimed - deltaColdStorage - deltaMintFees,
+                reserves: deltaReserves,
+                ecashIssued: deltaEcashIssued,
+                proofsPending: deltaProofsPending,
             },
         }
     })

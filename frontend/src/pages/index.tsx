@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getAlerts, getCollectorStatus, getLatestObservation, getTimeseries } from '@/lib/api'
+import {
+  getAlerts,
+  getCollectorStatus,
+  getDeltas,
+  getLatestObservation,
+  getTimeseries,
+} from '@/lib/api'
 import { formatAge, formatSat } from '@/lib/format'
 import { StatusPill } from '@/components/StatusPill'
 import { StatTile } from '@/components/StatTile'
 import { ChartCard } from '@/components/ChartCard'
 import { AlertPanel } from '@/components/AlertPanel'
 import { ReconciliationPanel } from '@/components/ReconciliationPanel'
-import { ChangeCard } from '@/components/ChangeCard'
+import { ChangeCard, ReservesChangeCard } from '@/components/ChangeCard'
 import { RangeFilter, RangeOption } from '@/components/RangeFilter'
 import {
   OwnCapitalChart,
@@ -14,41 +20,63 @@ import {
   SeriesTable,
   toRows,
 } from '@/components/ReserveCharts'
-import type { Alert, CollectorStatus, Observation, TimeseriesPoint } from '@/lib/types'
+import type {
+  Alert,
+  CollectorStatus,
+  DeltaResponse,
+  Observation,
+  TimeseriesPoint,
+} from '@/lib/types'
 
 const POLL_MS = 30_000
 
+/**
+ * ONE range for the whole page — charts, tiles and both change cards.
+ *
+ * These used to be two independent controls, which meant the page could show a
+ * 24h chart above a 1h change card and invite you to read one as the cause of
+ * the other. Everything now answers the same question over the same window.
+ *
+ * Minutes throughout, because the range reaches 5 minutes and hours cannot
+ * express that: the timeseries endpoint parses an integer, so a fractional hour
+ * collapsed to 0 and silently fell back to 24h.
+ */
 const RANGES: RangeOption[] = [
-  { label: '6h', value: 6 },
-  { label: '24h', value: 24 },
-  { label: '7d', value: 168 },
-  { label: '30d', value: 720 },
+  { label: '5 min', value: 5 },
+  { label: '1h', value: 60 },
+  { label: '6h', value: 360 },
+  { label: '24h', value: 1440 },
+  { label: '7d', value: 10_080 },
+  { label: '30d', value: 43_200 },
 ]
 
 export default function Dashboard() {
-  const [hours, setHours] = useState(24)
+  const [minutes, setMinutes] = useState(1440)
   const [status, setStatus] = useState<CollectorStatus | null>(null)
   const [observation, setObservation] = useState<Observation | null>(null)
   const [points, setPoints] = useState<TimeseriesPoint[]>([])
+  const [deltas, setDeltas] = useState<DeltaResponse | null>(null)
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadedAt, setLoadedAt] = useState<Date | null>(null)
   const [refetching, setRefetching] = useState(false)
 
   const refresh = useCallback(
-    async (h: number) => {
+    async (m: number) => {
       setRefetching(true)
       try {
-        const [s, o, ts, al] = await Promise.all([
+        const [s, o, ts, al, dl] = await Promise.all([
           getCollectorStatus(),
           getLatestObservation(),
-          getTimeseries(h),
+          getTimeseries(m),
           getAlerts('FIRING'),
+          getDeltas(m),
         ])
         setStatus(s)
         setObservation(o.observation)
         setPoints(ts.points)
         setAlerts(al.alerts)
+        setDeltas(dl)
         setError(null)
         setLoadedAt(new Date())
       } catch (e: any) {
@@ -61,17 +89,16 @@ export default function Dashboard() {
   )
 
   useEffect(() => {
-    void refresh(hours)
-    const t = setInterval(() => void refresh(hours), POLL_MS)
+    void refresh(minutes)
+    const t = setInterval(() => void refresh(minutes), POLL_MS)
     return () => clearInterval(t)
-  }, [refresh, hours])
+  }, [refresh, minutes])
 
   const rows = useMemo(() => toRows(points), [points])
   const r = observation?.reconciliation ?? null
 
-  // Endpoints of the real (non-gap) data, so the headline change is not computed
-  // from a synthetic gap marker.
-  const real = rows.filter((x) => !x.gap && x.ownCapital !== null)
+  /** msat → sat as a number, for tile arithmetic only. */
+  const satNum = (msat: string) => Number(BigInt(msat) / 1000n)
 
   /**
    * Own capital falling is not in itself bad news.
@@ -83,25 +110,25 @@ export default function Dashboard() {
    * Because `ownCapitalNet = ownCapital − unclaimed`, the change in the NET line
    * is exactly the part unclaimed does not account for. So the tile keys its tone
    * and its wording off that, not off the raw change.
+   *
+   * Sourced from /deltas rather than differenced from the plotted rows, so the
+   * tile, the change cards and the drift rules cannot report different numbers
+   * for the same window.
    */
   const change = (() => {
-    if (real.length < 2) return null
-    const a = real[0]
-    const b = real[real.length - 1]
-    const own = (b.ownCapital as number) - (a.ownCapital as number)
-    const unexplained = (b.ownCapitalNet as number) - (a.ownCapitalNet as number)
-    return { own, unexplained, unclaimed: own - unexplained }
+    const d = deltas?.deltas
+    if (!d) return null
+    const own = satNum(d.ownCapital)
+    const unclaimed = satNum(d.unclaimed)
+    return { own, unexplained: own - unclaimed, unclaimed }
   })()
 
-  const rangeLabel = RANGES.find((x) => x.value === hours)?.label ?? `${hours}h`
+  const rangeLabel = RANGES.find((x) => x.value === minutes)?.label ?? `${minutes}m`
 
   /** Outstanding ecash over the same window. Raw change — no floor, since this is
    *  volume rather than an alerting signal, and hiding a small real movement
    *  would lose information for no benefit. */
-  const ecashChange =
-    real.length >= 2
-      ? (real[real.length - 1].ecashIssued as number) - (real[0].ecashIssued as number)
-      : null
+  const ecashChange = deltas?.deltas ? satNum(deltas.deltas.ecashIssued) : null
 
   /** Absorbs msat→sat rounding; real thresholds are calibrated in the rules. */
   const MATERIAL_SAT = 1_000
@@ -204,15 +231,14 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* One filter row above both charts — they always render the same slice.
-          The change card carries its own, because "what moved recently" is asked
-          over a different horizon than the one you want plotted. */}
+      {/* The page's only range control. Everything below — and the deltas on the
+          tiles above — answers over this window. */}
       <div className="mb-3">
         <RangeFilter
           label="Range"
           options={RANGES}
-          value={hours}
-          onChange={setHours}
+          value={minutes}
+          onChange={setMinutes}
           trailing={`${rows.length} observations`}
         />
       </div>
@@ -237,8 +263,9 @@ export default function Dashboard() {
         </ChartCard>
       </div>
 
-      <div className="mb-5">
-        <ChangeCard unit={r?.unit ?? 'sat'} />
+      <div className="mb-5 grid gap-4 lg:grid-cols-2">
+        <ReservesChangeCard data={deltas} error={error} stale={refetching} />
+        <ChangeCard data={deltas} error={error} stale={refetching} />
       </div>
 
       <ReconciliationPanel

@@ -1,57 +1,34 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getDeltas } from '@/lib/api'
+import { ReactNode } from 'react'
 import { formatSatSigned } from '@/lib/format'
-import { RangeFilter, RangeOption } from '@/components/RangeFilter'
 import type { DeltaResponse } from '@/lib/types'
 
 /**
- * Change in the reconciliation terms over a selected window.
+ * Change in the reconciliation terms over the page's selected window.
  *
- * Its own card with its own range control, because the question it answers —
- * "what moved, and was any of it unexplained?" — is asked over a different
- * horizon than the one you want the charts drawn at.
+ * Two cards live here because they are the same object viewed from two sides —
+ * one shows what the balance sheet did, the other what it means — and they share
+ * a shell, a row renderer and an empty state. Splitting them would duplicate all
+ * three to no benefit.
  *
- * Deltas come from the API rather than being differenced client-side, so this
- * and the drift rules compute from the same endpoints. A dashboard that
- * disagreed with its own alerts would be worse than no dashboard.
+ * Both are presentational: the window is owned by the page, and the numbers come
+ * from /deltas rather than being differenced client-side, so these cards, the KPI
+ * tiles and the drift rules all resolve to one computation over one pair of
+ * endpoints. A dashboard that disagreed with its own alerts would be worse than
+ * no dashboard.
  */
-const RANGES: RangeOption[] = [
-  { label: '5 min', value: 5 },
-  { label: '1h', value: 60 },
-  { label: '6h', value: 360 },
-  { label: '24h', value: 1440 },
-  { label: '7d', value: 10080 },
-  { label: '30d', value: 43200 },
-]
+export interface DeltaCardProps {
+  data: DeltaResponse | null
+  error?: string | null
+  stale?: boolean
+}
 
-const POLL_MS = 30_000
-
-export function ChangeCard({ unit }: { unit: string }) {
-  const [minutes, setMinutes] = useState(60)
-  const [data, setData] = useState<DeltaResponse | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [stale, setStale] = useState(false)
-
-  const refresh = useCallback(async (m: number) => {
-    setStale(true)
-    try {
-      setData(await getDeltas(m))
-      setError(null)
-    } catch (e: any) {
-      setError(String(e?.message ?? e))
-    } finally {
-      setStale(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void refresh(minutes)
-    const t = setInterval(() => void refresh(minutes), POLL_MS)
-    return () => clearInterval(t)
-  }, [refresh, minutes])
-
-  const d = data?.deltas ?? null
-
+function DeltaCardShell({
+  title,
+  data,
+  error,
+  stale,
+  children,
+}: DeltaCardProps & { title: string; children: ReactNode }) {
   // The endpoints are real readings, but that does not make the interval
   // continuously observed.
   const gapHours =
@@ -64,7 +41,7 @@ export function ChangeCard({ unit }: { unit: string }) {
     >
       <header className="mb-3 flex flex-wrap items-baseline justify-between gap-3">
         <h2 className="text-sm font-semibold" style={{ color: 'var(--viz-ink)' }}>
-          Change over interval ({unit})
+          {title}
         </h2>
         <span className="text-xs" style={{ color: 'var(--viz-muted)' }}>
           {data?.samples ? `${data.samples} observations` : ''}
@@ -74,10 +51,6 @@ export function ChangeCard({ unit }: { unit: string }) {
         </span>
       </header>
 
-      <div className="mb-3">
-        <RangeFilter label="Interval" options={RANGES} value={minutes} onChange={setMinutes} />
-      </div>
-
       {error && (
         <p className="text-sm" style={{ color: 'var(--status-critical)' }}>
           <span aria-hidden>● </span>
@@ -85,29 +58,41 @@ export function ChangeCard({ unit }: { unit: string }) {
         </p>
       )}
 
-      {!error && !d && (
+      {!error && !data?.deltas && (
         <p className="text-sm" style={{ color: 'var(--viz-ink-2)' }}>
           Not enough observations in this interval yet — two are needed to measure a change.
         </p>
       )}
 
-      {d && (
+      {data?.deltas && (
         <div style={{ opacity: stale ? 0.55 : 1, transition: 'opacity 150ms' }}>
+          {children}
+
+          {gapHours && (
+            <p className="mt-1.5 text-xs" style={{ color: 'var(--status-warning)' }}>
+              <span aria-hidden>▲ </span>
+              Interval contains a {gapHours}h collection gap — the endpoints are real readings,
+              but the period between them was not observed.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+export function ChangeCard({ data, error, stale }: DeltaCardProps) {
+  const d = data?.deltas
+
+  return (
+    <DeltaCardShell title="Change in own capital" data={data} error={error} stale={stale}>
+      {d && (
+        <>
           <dl className="text-sm">
             <Row label="Δ Own capital" value={d.ownCapital} />
             <Row label="Δ Unclaimed" value={d.unclaimed} sign="−" note="explained by mint state" />
-            <Row
-              label="Δ Cold storage"
-              value={d.coldStorage}
-              sign="−"
-              note="operator-declared"
-            />
-            <Row
-              label="Δ Mint fees collected"
-              value={d.mintFees}
-              sign="−"
-              note="known income"
-            />
+            <Row label="Δ Cold storage" value={d.coldStorage} sign="−" note="operator-declared" />
+            <Row label="Δ Mint fees collected" value={d.mintFees} sign="−" note="known income" />
             <div
               className="mt-1 flex items-baseline justify-between gap-3 pt-2"
               style={{ borderTop: '1px solid var(--viz-axis)' }}
@@ -126,19 +111,63 @@ export function ChangeCard({ unit }: { unit: string }) {
 
           <p className="mt-2 text-xs" style={{ color: 'var(--viz-muted)' }}>
             Every subtracted term is an explained change, so what remains is the part nothing
-            accounts for. Remaining delta is node routing income, rounding of routing fees by the mint or other that might need attention.
+            accounts for. Remaining delta is node routing income, rounding of routing fees by the
+            mint or other that might need attention.
           </p>
-
-          {gapHours && (
-            <p className="mt-1.5 text-xs" style={{ color: 'var(--status-warning)' }}>
-              <span aria-hidden>▲ </span>
-              Interval contains a {gapHours}h collection gap — the endpoints are real readings,
-              but the period between them was not observed.
-            </p>
-          )}
-        </div>
+        </>
       )}
-    </section>
+    </DeltaCardShell>
+  )
+}
+
+/**
+ * The balance-sheet view of the same window: what the assets did, what the
+ * liabilities did.
+ *
+ * Deliberately toneless. Reserves and outstanding ecash normally move TOGETHER
+ * and in the same direction — a melt lowers both, a mint raises both — so a fall
+ * in either is business as usual, not a warning. What carries judgement is
+ * whether they moved together, which is what the closing line shows: the two
+ * sides plus proofs pending reconstruct Δ own capital exactly, so a divergence
+ * between assets and liabilities has nowhere to hide.
+ */
+export function ReservesChangeCard({ data, error, stale }: DeltaCardProps) {
+  const d = data?.deltas
+
+  return (
+    <DeltaCardShell
+      title="Change in reserves and issued ecash"
+      data={data}
+      error={error}
+      stale={stale}
+    >
+      {d && (
+        <>
+          <dl className="text-sm">
+            <Row label="Δ Reserves" value={d.reserves} note="LND + cold storage + mint on-chain" />
+            <Row label="Δ Ecash issued" value={d.ecashIssued} sign="−" note="outstanding liability" />
+            <Row label="Δ Proofs pending" value={d.proofsPending} sign="+" note="locked in a melt" />
+            <div
+              className="mt-1 flex items-baseline justify-between gap-3 pt-2"
+              style={{ borderTop: '1px solid var(--viz-axis)' }}
+            >
+              <dt className="pl-7 font-medium" style={{ color: 'var(--viz-ink)' }}>
+                = Δ Own capital
+              </dt>
+              <dd className="font-mono font-semibold tabular-nums" style={{ color: 'var(--viz-ink)' }}>
+                {formatSatSigned(d.ownCapital)}
+              </dd>
+            </div>
+          </dl>
+
+          <p className="mt-2 text-xs" style={{ color: 'var(--viz-muted)' }}>
+            Assets against liabilities. These normally move together — a melt lowers both, a mint
+            raises both — so direction alone means little; it is the two sides diverging that
+            changes own capital.
+          </p>
+        </>
+      )}
+    </DeltaCardShell>
   )
 }
 

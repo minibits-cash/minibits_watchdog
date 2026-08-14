@@ -31,10 +31,19 @@ export function getLatestObservation() {
   return get<{ observation: Observation | null }>('/api/observations/latest')
 }
 
-export function getTimeseries(hours: number) {
-  return get<{ from: string; hours: number; count: number; points: TimeseriesPoint[] }>(
-    `/api/timeseries?hours=${hours}`,
-  )
+/**
+ * Minutes, not hours: the shared range control reaches down to 5 minutes, which
+ * hours cannot express — the endpoint parses an integer, so a fractional hour
+ * became 0 and silently fell back to the 24h default.
+ */
+export function getTimeseries(minutes: number) {
+  return get<{
+    from: string
+    hours: number
+    minutes: number
+    count: number
+    points: TimeseriesPoint[]
+  }>(`/api/timeseries?minutes=${minutes}`)
 }
 
 export function getDeltas(minutes: number) {

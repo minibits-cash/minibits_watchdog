@@ -133,6 +133,10 @@ export interface DeltaResponse {
   maxGapMs: number | null
   deltas: {
     unit: string
+    /** Asset and liability sides of the window. See /deltas — served, not differenced here. */
+    reserves: Msat
+    ecashIssued: Msat
+    proofsPending: Msat
     ownCapital: Msat
     unclaimed: Msat
     coldStorage: Msat

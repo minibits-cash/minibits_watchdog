@@ -7,9 +7,10 @@ import type {
 } from './types'
 
 /**
- * Relative paths only. Next rewrites /api/* to the backend (see next.config.mjs),
- * so the browser never needs to know the API's address — which means it is not
- * baked into this bundle at build time and can be changed with a restart.
+ * Relative paths only. The /api/* route handler proxies to the backend (see
+ * src/pages/api/[...path].ts), so the browser never needs to know the API's
+ * address — which means it is not baked into this bundle at build time and can
+ * be changed with a restart.
  *
  * Safe because every fetch here runs in an effect, i.e. client-side, where a
  * relative URL resolves against the page origin.

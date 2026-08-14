@@ -8,7 +8,8 @@ import { config } from '../config'
  * so the number means the same thing regardless of collection interval or a
  * missed sample:
  *
- *   Remaining delta = Δ Own capital − Δ Total unclaimed
+ *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
+ *                     − Δ Unspendable ecash − Δ Mint fees
  *   rate            = Remaining delta / elapsed hours
  *
  * Computed from the window endpoints, not by summing per-tick deltas, so gaps in
@@ -58,7 +59,29 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
 
             const deltaOwnCapital = last.ownCapital - first.ownCapital
             const deltaUnclaimed = last.unclaimed - first.unclaimed
-            const remaining = deltaOwnCapital - deltaUnclaimed
+
+            // The operator-declared terms are subtracted here for the same reason
+            // the stored column and /deltas subtract them: revising a declaration
+            // steps own capital, and that step is explained, not drift.
+            //
+            // This rule previously omitted them, so it disagreed with both — and
+            // editing COLD_STORAGE_RESERVES would have fired the very alert
+            // .env.example promises it will not. One definition of "remaining
+            // delta" now applies to the stored row, the dashboard and the alert.
+            const deltaColdStorage = last.coldStorage - first.coldStorage
+            const deltaUnspendable = last.provablyUnspendable - first.provablyUnspendable
+            const deltaMintFees = last.mintFeesCollected - first.mintFeesCollected
+
+            const remaining =
+                deltaOwnCapital -
+                deltaUnclaimed -
+                deltaColdStorage -
+                deltaUnspendable -
+                deltaMintFees
+
+            const declared = deltaColdStorage + deltaUnspendable + deltaMintFees
+            const declaredNote =
+                declared !== 0n ? ` Declared/known terms removed: ${formatSat(declared)} sat.` : ''
 
             const ratePerHour = (remaining * 3_600_000n) / BigInt(elapsedMs)
 
@@ -97,6 +120,7 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
                         `Remaining delta ${formatSat(remaining)} sat across ${(elapsedMs / 3_600_000).toFixed(1)}h. ` +
                         `Expected ${formatSat(expected)} sat/h, alert below ${formatSat(fireBelow)} sat/h. ` +
                         `Δ own capital ${formatSat(deltaOwnCapital)} sat, Δ unclaimed ${formatSat(deltaUnclaimed)} sat.` +
+                        declaredNote +
                         gapNote,
                     context: {
                         unit,

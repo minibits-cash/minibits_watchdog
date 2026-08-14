@@ -92,6 +92,12 @@ export function ChangeCard({ data, error, stale }: DeltaCardProps) {
             <Row label="Δ Own capital" value={d.ownCapital} />
             <Row label="Δ Unclaimed" value={d.unclaimed} sign="−" note="explained by mint state" />
             <Row label="Δ Cold storage" value={d.coldStorage} sign="−" note="operator-declared" />
+            <Row
+              label="Δ Unspendable ecash"
+              value={d.provablyUnspendable}
+              sign="−"
+              note="operator-declared"
+            />
             <Row label="Δ Mint fees collected" value={d.mintFees} sign="−" note="known income" />
             <div
               className="mt-1 flex items-baseline justify-between gap-3 pt-2"

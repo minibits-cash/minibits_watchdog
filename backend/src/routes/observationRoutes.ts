@@ -138,6 +138,7 @@ export async function observationRoutes(app: FastifyInstance) {
         const deltaOwnCapital = last.ownCapital - first.ownCapital
         const deltaUnclaimed = last.unclaimed - first.unclaimed
         const deltaColdStorage = last.coldStorage - first.coldStorage
+        const deltaProvablyUnspendable = last.provablyUnspendable - first.provablyUnspendable
         const deltaMintFees = last.mintFeesCollected - first.mintFeesCollected
 
         // The asset and liability sides of the same window. Served from here
@@ -162,8 +163,14 @@ export async function observationRoutes(app: FastifyInstance) {
                 ownCapital: deltaOwnCapital,
                 unclaimed: deltaUnclaimed,
                 coldStorage: deltaColdStorage,
+                provablyUnspendable: deltaProvablyUnspendable,
                 mintFees: deltaMintFees,
-                remaining: deltaOwnCapital - deltaUnclaimed - deltaColdStorage - deltaMintFees,
+                remaining:
+                    deltaOwnCapital -
+                    deltaUnclaimed -
+                    deltaColdStorage -
+                    deltaProvablyUnspendable -
+                    deltaMintFees,
                 reserves: deltaReserves,
                 ecashIssued: deltaEcashIssued,
                 proofsPending: deltaProofsPending,

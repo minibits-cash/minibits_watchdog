@@ -9,8 +9,9 @@ import { MintReading } from '../sources/mint/mintSource'
  *
  *   Reserves        = Channel local + On-chain (LND) + Limbo + Cold storage
  *                     + Mint on-chain (BDK)
- *   Own capital     = Reserves − Ecash issued + Proofs pending
- *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage − Δ Mint fees
+ *   Own capital     = Reserves − Ecash issued + Unspendable ecash + Proofs pending
+ *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
+ *                     − Δ Unspendable ecash − Δ Mint fees
  *
  * `Own capital` is the mint's equity: reserves in excess of what it owes. It is
  * a level and carries no signal on its own, being accumulated
@@ -43,6 +44,9 @@ export async function writeReconciliation(
 
     const totalNode = totalNodeBalance(lnd)
     const coldStorage = BigInt(config.coldStorageReservesSat) * 1000n
+    // Not netted off mintBalance: that stays the mint's own figure, so it can be
+    // checked against the database. See config.provablyUnspendableEcashSat.
+    const provablyUnspendable = BigInt(config.provablyUnspendableEcashSat) * 1000n
     const mintBalance = mintUnit.issued - mintUnit.redeemed
     const proofsPending = mintUnit.proofsPending
     const unclaimed = mintUnit.unclaimedMintQuotes
@@ -52,7 +56,8 @@ export async function writeReconciliation(
     // directly, so it belongs in reserves alongside the node's balances.
     const mintOnchain = mintUnit.onchainBalance
 
-    const ownCapital = totalNode + coldStorage + mintOnchain - mintBalance + proofsPending
+    const ownCapital =
+        totalNode + coldStorage + mintOnchain - mintBalance + provablyUnspendable + proofsPending
 
     // Previous reconciliation for the same unit, for the delta terms.
     const prev = await prisma.reconciliation.findFirst({
@@ -69,6 +74,7 @@ export async function writeReconciliation(
     let deltaOwnCapital: bigint | null = null
     let deltaUnclaimed: bigint | null = null
     let deltaColdStorage: bigint | null = null
+    let deltaProvablyUnspendable: bigint | null = null
     let deltaMintFees: bigint | null = null
     let remainingDelta: bigint | null = null
     let elapsedMs: number | null = null
@@ -78,21 +84,35 @@ export async function writeReconciliation(
         deltaOwnCapital = ownCapital - prev.ownCapital
         deltaUnclaimed = unclaimed - prev.unclaimed
         deltaColdStorage = coldStorage - prev.coldStorage
+        deltaProvablyUnspendable = provablyUnspendable - prev.provablyUnspendable
         deltaMintFees = mintFeesCollected - prev.mintFeesCollected
 
         // Remaining delta measures UNEXPLAINED change. Every subtracted term is
-        // explained: unclaimed quotes by mint state, cold storage by operator
-        // declaration, mint fees by the mint's own ledger.
+        // explained: unclaimed quotes by mint state, cold storage and unspendable
+        // ecash by operator declaration, mint fees by the mint's own ledger.
         //
         // Subtracting fee income is not bookkeeping neatness — earning +X while
         // something drains −X would otherwise leave this at zero and the mint
         // looking healthy. Removing known income exposes the drain.
-        remainingDelta = deltaOwnCapital - deltaUnclaimed - deltaColdStorage - deltaMintFees
+        remainingDelta =
+            deltaOwnCapital -
+            deltaUnclaimed -
+            deltaColdStorage -
+            deltaProvablyUnspendable -
+            deltaMintFees
 
         if (deltaColdStorage !== 0n) {
             log.warn('[reconciliation] declared cold-storage reserves changed', {
                 fromSat: (prev.coldStorage / 1000n).toString(),
                 toSat: (coldStorage / 1000n).toString(),
+                note: 'excluded from remainingDelta as a declared movement',
+            })
+        }
+
+        if (deltaProvablyUnspendable !== 0n) {
+            log.warn('[reconciliation] declared unspendable ecash changed', {
+                fromSat: (prev.provablyUnspendable / 1000n).toString(),
+                toSat: (provablyUnspendable / 1000n).toString(),
                 note: 'excluded from remainingDelta as a declared movement',
             })
         }
@@ -106,6 +126,7 @@ export async function writeReconciliation(
             coldStorage,
             mintOnchain,
             mintBalance,
+            provablyUnspendable,
             proofsPending,
             ownCapital,
             unclaimed,
@@ -115,6 +136,7 @@ export async function writeReconciliation(
             deltaOwnCapital,
             deltaUnclaimed,
             deltaColdStorage,
+            deltaProvablyUnspendable,
             deltaMintFees,
             remainingDelta,
         },

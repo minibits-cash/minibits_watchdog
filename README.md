@@ -16,8 +16,10 @@ made, including several that look wrong until you know what they prevent.
 ```
 Reserves        = LND channel local + LND on-chain + limbo
                   + cold storage (declared) + mint on-chain wallet
-Own capital     = Reserves − Ecash issued + Proofs pending
-Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage − Δ Mint fees
+Own capital     = Reserves − Ecash issued + Unspendable ecash (declared)
+                  + Proofs pending
+Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
+                  − Δ Unspendable ecash − Δ Mint fees
 ```
 
 **`Own capital` is the mint's equity** — reserves beyond what it owes. It is a *level*, and
@@ -184,6 +186,7 @@ Everything is documented inline in `backend/.env.example`. The options most wort
 | `ENABLED_NOTIFIERS` | `ntfy,email`. Enabling both gives delivery redundancy: a send succeeds if *any* transport does, and a partial failure is still recorded. |
 | `NTFY_REDACT_AMOUNTS`, `EMAIL_REDACT_AMOUNTS` | Strip figures from outbound alerts, **per transport** — a public ntfy topic and a mailbox on your own domain are different exposures. Severity and subject survive, so alerts stay actionable. Both default to `true`: disclosure should be deliberate, so an unset variable errs toward privacy. |
 | `COLD_STORAGE_RESERVES` | Operator-declared reserves held outside the node. Changing it is treated as a *declared* movement and excluded from drift — but the window between moving coins and updating it will alert, by design. |
+| `PROVABLY_UNSPENDABLE_ECASH` | Operator-declared issued ecash that can never be redeemed (e.g. promises stranded by a mint migration). Added to *own capital* rather than deducted from *ecash issued*, so the measured liability stays checkable against the mint database. Also excluded from drift as a declared value. Only for provably unspendable ecash — dormant or unclaimed balances do not belong here. |
 | `HEARTBEAT_URL` | Optional. Log markers work without it (below). |
 
 Frontend (`frontend/.env.local`), both read at server start — restart, no rebuild:

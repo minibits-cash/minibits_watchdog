@@ -75,6 +75,8 @@ export interface Reconciliation {
   coldStorage: Msat
   mintOnchain: Msat
   mintBalance: Msat
+  /** Declared issued ecash that can never be redeemed. Added to own capital. */
+  provablyUnspendable: Msat
   proofsPending: Msat
   ownCapital: Msat
   unclaimed: Msat
@@ -82,6 +84,7 @@ export interface Reconciliation {
   deltaOwnCapital: Msat | null
   deltaUnclaimed: Msat | null
   deltaColdStorage: Msat | null
+  deltaProvablyUnspendable: Msat | null
   deltaMintFees: Msat | null
   remainingDelta: Msat | null
 }
@@ -137,6 +140,8 @@ export interface DeltaResponse {
     reserves: Msat
     ecashIssued: Msat
     proofsPending: Msat
+    /** Declared unspendable ecash. Explained, like cold storage. */
+    provablyUnspendable: Msat
     ownCapital: Msat
     unclaimed: Msat
     coldStorage: Msat

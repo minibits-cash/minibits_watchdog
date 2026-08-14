@@ -192,8 +192,13 @@ model Reconciliation {
   coldStorage      BigInt @default(0)
   /// On-chain reserves in the mint's own BDK wallet (ledger-derived, interim).
   mintOnchain      BigInt @default(0)
-  /// issued − redeemed
+  /// issued − redeemed. Purely measured — declared adjustments never fold in here.
   mintBalance      BigInt
+  /// Operator-declared issued ecash that can never be redeemed
+  /// (PROVABLY_UNSPENDABLE_ECASH), e.g. promises stranded by a mint migration.
+  /// Added to own capital rather than deducted from mintBalance, so the measured
+  /// liability stays audit-able against the mint database. Arithmetically the same.
+  provablyUnspendable BigInt @default(0)
   proofsPending    BigInt
   /// The mint's own capital: reserves in excess of what it owes.
   /// totalNodeBalance + coldStorage − mintBalance + proofsPending
@@ -220,6 +225,9 @@ model Reconciliation {
   /// operator-declared movement is *explained* — without this, editing
   /// COLD_STORAGE_RESERVES would step ownCapital and read as drift.
   deltaColdStorage  BigInt?
+  /// Change in declared unspendable ecash. Subtracted for the same reason as
+  /// cold storage: revising the declaration is explained, not drift.
+  deltaProvablyUnspendable BigInt?
   /// Change in cumulative mint fees. Subtracted because it is explained income.
   ///
   /// Not merely tidiness: fee income can MASK a leak. Earning +X while something

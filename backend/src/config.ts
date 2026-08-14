@@ -94,6 +94,25 @@ export const config = {
      */
     coldStorageReservesSat: intVar('COLD_STORAGE_RESERVES', 0),
 
+    /**
+     * Issued ecash the operator knows can never be redeemed — typically promises
+     * stranded by a migration to a mint implementation that cannot spend them.
+     *
+     * `issued − redeemed` counts them as a liability the mint will never actually
+     * settle, which understates own capital by a fixed amount forever.
+     *
+     * Added to own capital rather than deducted from `mintBalance`, deliberately:
+     * `mintBalance` stays exactly what the mint database says, so a measurement
+     * and a declaration never get blended into one number. The arithmetic is
+     * identical either way — `−(mintBalance − U)` is `−mintBalance + U` — so the
+     * only thing at stake is which figure remains audit-able against the mint,
+     * and it should be the measured one.
+     *
+     * Like cold storage, changing it is a DECLARED movement and is excluded from
+     * remaining delta, so correcting the figure raises no false drift alert.
+     */
+    provablyUnspendableEcashSat: intVar('PROVABLY_UNSPENDABLE_ECASH', 0),
+
 
     sources: {
         lnd: lndEnabled,

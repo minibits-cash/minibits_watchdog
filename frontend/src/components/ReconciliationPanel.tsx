@@ -147,6 +147,25 @@ export function ReconciliationPanel({
           }
         />
 
+        {/*
+          Only rendered when declared. At zero — the default — an extra line
+          asserting "nothing here" is noise in an equation meant to be read at a
+          glance.
+
+          A liability the mint will never settle is not a liability, so removing
+          it raises equity. Kept as its own term rather than netted off "Ecash
+          issued" above, so that figure remains exactly what the mint database
+          reports and stays checkable against it.
+        */}
+        {BigInt(r.provablyUnspendable ?? 0) !== 0n && (
+          <Term
+            sign="+"
+            label="Unspendable ecash"
+            value={r.provablyUnspendable}
+            hint="declared never-redeemable (PROVABLY_UNSPENDABLE_ECASH)"
+          />
+        )}
+
         <Term
           sign="+"
           label="Proofs pending"
@@ -172,12 +191,20 @@ export function ReconciliationPanel({
                   value={r.unclaimed}
                   note="INCLUDED here, but arguably owed — see below"
                 />
+                {BigInt(r.provablyUnspendable ?? 0) !== 0n && (
+                  <SubRow
+                    label="Unspendable ecash"
+                    value={r.provablyUnspendable}
+                    note="declared never-redeemable; raises equity"
+                  />
+                )}
                 <SubRow
                   label="Unattributed"
                   value={(
                     BigInt(r.ownCapital) -
                     BigInt(r.mintFeesCollected) -
-                    BigInt(r.unclaimed)
+                    BigInt(r.unclaimed) -
+                    BigInt(r.provablyUnspendable ?? 0)
                   ).toString()}
                   muted
                   note="routing income, fee rounding, channel reserve, initial capital"

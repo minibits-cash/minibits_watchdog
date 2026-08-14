@@ -123,15 +123,29 @@ export function ReconciliationPanel({
           note={unclaimedSplit(r.unclaimed, mint?.unclaimedOnchain)}
         />
 
+        {/*
+          The declared write-off lives in this bucket, not in Reserves.
+
+          It is a carve-out of the liability — issued promises the mint will never
+          have to settle — so it belongs beside the thing it reduces. Adding it to
+          Reserves instead would inflate the figure the KPI tile and the
+          reserves-vs-ecash chart both read, and whose CROSSING of the ecash line
+          is the insolvency signal; an over-declaration would then shift that
+          crossing and mask a real shortfall.
+
+          The headline value stays the raw `issued − redeemed` from the mint
+          database, so it remains checkable against it. The write-off is shown one
+          level down, and reaches own capital as its own term.
+        */}
         <Term
           sign="−"
           label="Ecash issued"
           value={r.mintBalance}
           hint="issued − redeemed"
           drill={
-            mint?.keysetBreakdown?.length ? (
+            mint?.keysetBreakdown?.length || BigInt(r.provablyUnspendable ?? 0) !== 0n ? (
               <>
-                {mint.keysetBreakdown.map((k) => {
+                {mint?.keysetBreakdown?.map((k) => {
                   const outstanding = (BigInt(k.issued) - BigInt(k.redeemed)).toString()
                   return (
                     <SubRow
@@ -142,29 +156,18 @@ export function ReconciliationPanel({
                     />
                   )
                 })}
+                {BigInt(r.provablyUnspendable ?? 0) !== 0n && (
+                  <SubRow
+                    label="↳ of which provably unspendable"
+                    value={r.provablyUnspendable}
+                    muted
+                    note="declared never-redeemable · added back to own capital, not a real liability"
+                  />
+                )}
               </>
             ) : null
           }
         />
-
-        {/*
-          Only rendered when declared. At zero — the default — an extra line
-          asserting "nothing here" is noise in an equation meant to be read at a
-          glance.
-
-          A liability the mint will never settle is not a liability, so removing
-          it raises equity. Kept as its own term rather than netted off "Ecash
-          issued" above, so that figure remains exactly what the mint database
-          reports and stays checkable against it.
-        */}
-        {BigInt(r.provablyUnspendable ?? 0) !== 0n && (
-          <Term
-            sign="+"
-            label="Unspendable ecash"
-            value={r.provablyUnspendable}
-            hint="declared never-redeemable (PROVABLY_UNSPENDABLE_ECASH)"
-          />
-        )}
 
         <Term
           sign="+"
@@ -179,6 +182,13 @@ export function ReconciliationPanel({
             label="Own capital"
             value={r.ownCapital}
             emphasis
+            /* Closes the arithmetic: the write-off is one level down under Ecash
+               issued, so without this the visible terms do not reach this total. */
+            hint={
+              BigInt(r.provablyUnspendable ?? 0) !== 0n
+                ? `incl. +${formatSat(r.provablyUnspendable)} unspendable ecash`
+                : undefined
+            }
             drill={
               <>
                 <SubRow

@@ -63,14 +63,19 @@ export class NtfyNotifier implements Notifier {
             headers.Authorization = `Bearer ${config.ntfy.token}`
         }
 
-        const body = [
-            n.detail ?? '',
-            '',
-            `rule: ${n.ruleId}`,
-            `subject: ${n.dedupeKey}`,
-        ]
-            .filter((l, i, a) => !(l === '' && a[i - 1] === ''))
-            .join('\n')
+        // ntfy renders Title from the header, so the body does NOT repeat it —
+        // unlike email, where the subject is a separate surface. But a findings
+        // with no `detail` would leave only identifiers here, so the title is
+        // used as the body's opening line in exactly that case.
+        const lines = n.detail ? [n.detail] : [n.title]
+
+        lines.push('', `rule: ${n.ruleId}`, `subject: ${n.dedupeKey}`)
+
+        if (n.redacted) {
+            lines.push('', 'Amounts redacted (NTFY_REDACT_AMOUNTS) — see dashboard.')
+        }
+
+        const body = lines.filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n')
 
         const res = await fetch(this.endpoint, {
             method: 'POST',

@@ -27,6 +27,49 @@ const SUBJECT_PREFIX: Record<Severity, string> = {
     INFO: '[INFO]',
 }
 
+/**
+ * Subject and body, as pure functions so the rendered text can be asserted
+ * without an SMTP server — the body is the part an operator actually reads, and
+ * it was previously impossible to check without sending mail.
+ */
+export function emailSubject(n: Notification): string {
+    const prefix = n.resolved ? '[RESOLVED]' : SUBJECT_PREFIX[n.severity]
+    // Unlike ntfy's HTTP headers, MIME handles non-ASCII subjects itself, so no
+    // transliteration is needed here.
+    return `${prefix} ${n.title}`
+}
+
+export function emailBody(n: Notification): string {
+    // The title leads the body, and is NOT merely repeated from the subject.
+    // `detail` is optional — several rules omit it entirely ("LND not synced to
+    // graph"), and the two source-failure rules pass it through as undefined
+    // whenever the underlying error is null. Those alerts previously arrived
+    // with a body of nothing but identifiers, which reads as a delivery fault
+    // rather than as the alert it is.
+    const lines = [n.title]
+
+    if (n.detail && n.detail !== n.title) {
+        lines.push('', n.detail)
+    }
+
+    lines.push(
+        '',
+        `rule:     ${n.ruleId}`,
+        `subject:  ${n.dedupeKey}`,
+        `severity: ${n.severity}`,
+        `state:    ${n.resolved ? 'RESOLVED' : 'FIRING'}`,
+        `time:     ${new Date().toISOString()}`,
+    )
+
+    if (n.redacted) {
+        lines.push('', 'Amounts are redacted on this channel (EMAIL_REDACT_AMOUNTS).', 'Read the figures from the dashboard.')
+    }
+
+    lines.push('', '-- Minibits Watchdog')
+
+    return lines.join('\n')
+}
+
 export class EmailNotifier implements Notifier {
     readonly name = 'email'
 
@@ -52,29 +95,11 @@ export class EmailNotifier implements Notifier {
     }
 
     async send(n: Notification): Promise<void> {
-        const prefix = n.resolved ? '[RESOLVED]' : SUBJECT_PREFIX[n.severity]
-
-        // Unlike ntfy's HTTP headers, MIME handles non-ASCII subjects itself,
-        // so no transliteration is needed here.
-        const subject = `${prefix} ${n.title}`
-
-        const text = [
-            n.detail ?? '',
-            '',
-            `rule:     ${n.ruleId}`,
-            `subject:  ${n.dedupeKey}`,
-            `severity: ${n.severity}`,
-            `state:    ${n.resolved ? 'RESOLVED' : 'FIRING'}`,
-            `time:     ${new Date().toISOString()}`,
-            '',
-            '-- Minibits Watchdog',
-        ].join('\n')
-
         const info = await this.getTransporter().sendMail({
             from: config.email.from,
             to: config.email.to.split(',').map((a) => a.trim()).filter(Boolean),
-            subject,
-            text,
+            subject: emailSubject(n),
+            text: emailBody(n),
         })
 
         log.debug('[email] sent', { ruleId: n.ruleId, messageId: info.messageId })

@@ -22,6 +22,15 @@ export interface Notification {
     /** RESOLVED notifications close the loop so a silent alert is not assumed fixed. */
     resolved: boolean
     context?: Record<string, unknown>
+    /**
+     * Set by redactAmounts so a transport can say WHY the figures are missing.
+     *
+     * Without it a redacted alert reads as a broken one: the operator sees `***`
+     * or a bare subject and cannot tell a privacy setting from a bug — and
+     * "the alerting looks broken" is the one conclusion a watchdog must never
+     * invite by accident.
+     */
+    redacted?: boolean
 }
 
 export interface Notifier {
@@ -79,6 +88,7 @@ export function redactAmounts(n: Notification): Notification {
         // Context is stored locally, never transmitted, so it is dropped rather
         // than redacted.
         context: undefined,
+        redacted: true,
     }
 }
 

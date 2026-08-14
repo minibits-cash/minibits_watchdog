@@ -5,7 +5,7 @@
  * that will actually run — including the strict field extraction, which is the
  * part most likely to break across LND versions.
  *
- *   npm run probe:lnd
+ *   yarn probe:lnd
  */
 import 'dotenv/config'
 import { LndSource, totalNodeBalance } from '../src/sources/lnd/lndSource'

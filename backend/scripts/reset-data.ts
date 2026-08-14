@@ -1,10 +1,10 @@
 /**
  * Reset gathered data and/or rule configuration.
  *
- *   npm run reset:data                      # dry run — reports, writes nothing
- *   npm run reset:data -- --yes             # clear observations, KEEP rule tuning
- *   npm run reset:data -- --yes --rules-only # reseed rule defaults, KEEP observations
- *   npm run reset:data -- --yes --all       # clear both
+ *   yarn reset:data                      # dry run — reports, writes nothing
+ *   yarn reset:data --yes                # clear observations, KEEP rule tuning
+ *   yarn reset:data --yes --rules-only   # reseed rule defaults, KEEP observations
+ *   yarn reset:data --yes --all          # clear both
  *
  * ── Why the two are separable ────────────────────────────────────────────────
  *

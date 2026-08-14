@@ -1,0 +1,35 @@
+{
+  "name": "minibits-watchdog",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Root task runner. Delegates to backend/ and frontend/ via yarn --cwd, so neither package's dependency tree is hoisted or shared.",
+  "engines": {
+    "node": "^24"
+  },
+  "scripts": {
+    "postinstall": "yarn setup",
+    "setup": "yarn install:backend && yarn install:frontend",
+    "install:backend": "yarn --cwd backend install",
+    "install:frontend": "yarn --cwd frontend install",
+
+    "build": "yarn build:backend && yarn build:frontend",
+    "build:backend": "yarn --cwd backend run build",
+    "build:frontend": "yarn --cwd frontend run build",
+
+    "typecheck": "yarn --cwd backend run typecheck && yarn --cwd frontend run typecheck",
+
+    "start:backend": "yarn --cwd backend run start:prod",
+    "start:frontend": "yarn --cwd frontend run start",
+    "dev:backend": "yarn --cwd backend run start:dev",
+    "dev:frontend": "yarn --cwd frontend run dev",
+
+    "dev": "yarn dev:backend & yarn dev:frontend & wait",
+
+    "db:push": "yarn --cwd backend run prisma:updateDb",
+    "db:generate": "yarn --cwd backend run prisma:updateTypes",
+    "reset:data": "yarn --cwd backend run reset:data",
+    "probe:lnd": "yarn --cwd backend run probe:lnd",
+    "sql": "yarn --cwd backend run sql"
+  }
+}

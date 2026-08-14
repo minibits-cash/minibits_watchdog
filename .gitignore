@@ -1,4 +1,9 @@
 node_modules/
+
+# This project uses yarn. yarn.lock is committed; an npm lockfile appearing here
+# means someone ran npm install and is about to resolve a different tree.
+package-lock.json
+
 dist/
 .next/
 out/

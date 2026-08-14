@@ -64,18 +64,48 @@ SPEC.md           Specification and rationale.
 
 ## Setup
 
-Requires Node 24 and a Postgres instance for the watchdog's own data — **separate from the
-mint**, so watchdog load cannot affect the mint and the watchdog survives (and can alert
-on) mint database failure.
+Requires Node 24, **yarn 1.x (classic)**, and a Postgres instance for the watchdog's own
+data — **separate from the mint**, so watchdog load cannot affect the mint and the watchdog
+survives (and can alert on) mint database failure.
+
+This project uses yarn. `backend/yarn.lock` and `frontend/yarn.lock` are committed;
+`package-lock.json` is gitignored so a stray `npm install` cannot quietly resolve a
+different dependency tree.
+
+### From the repository root
+
+A root `package.json` delegates to both packages via `yarn --cwd`, so nothing needs a `cd`.
+It is a task runner only — **not** a yarn workspace, so each package keeps its own
+`node_modules` and neither dependency tree is hoisted.
+
+```bash
+yarn                 # installs backend + frontend (root postinstall)
+yarn db:push         # create/update the watchdog schema
+yarn build           # build both
+yarn typecheck       # typecheck both
+
+yarn start:backend           # or start:frontend
+yarn dev                     # both in watch mode, one terminal
+
+yarn reset:data --yes --rules-only    # args pass through, no `--` needed
+yarn sql ../scripts/verify-mint-light.sql
+yarn probe:lnd
+```
+
+Arguments are forwarded through both yarn levels, so unlike npm no `--` separator is
+required. `yarn setup` is available as an explicit alias for the install step.
+
+In production run the two processes under separate service units rather than `yarn dev`,
+so each can be restarted and logged independently.
 
 ### Backend
 
 ```bash
 cd backend
-cp .env.example .env      # every option is documented inline
-npm install
-npm run prisma:updateDb   # push schema to the watchdog database
-npm run start:dev
+cp .env.example .env       # every option is documented inline
+yarn install
+yarn prisma:updateDb       # push schema to the watchdog database
+yarn start:dev
 ```
 
 ### Frontend
@@ -83,16 +113,16 @@ npm run start:dev
 ```bash
 cd frontend
 cp .env.example .env.local
-npm install
-npm run build
-npm run start                     # http://localhost:3006
+yarn install
+yarn build
+yarn start                        # http://localhost:3006
 ```
 
 `PORT` and `BACKEND_URL` are both read at server start, so a second instance
 alongside a tunnelled production one needs no rebuild:
 
 ```bash
-PORT=3016 BACKEND_URL=http://127.0.0.1:3015 npm run start
+PORT=3016 BACKEND_URL=http://127.0.0.1:3015 yarn start
 ```
 
 ### Mint database role
@@ -167,9 +197,9 @@ Frontend (`frontend/.env.local`), both read at server start — restart, no rebu
 | `scripts/explain-mint-queries.sql` | `EXPLAIN` without `ANALYZE`. Planner estimates only, nothing executed. |
 | `scripts/verify-mint-accounting.sql` | Full ledger cross-check. **Scans the two largest tables** — see below. |
 | `backend/scripts/run-sql.mjs` | Runs a single-statement `.sql` file through the app's own read-only path. |
-| `backend/scripts/probe-lnd.ts` | `npm run probe:lnd` — reads LND through the real collector code path. |
+| `backend/scripts/probe-lnd.ts` | `yarn probe:lnd` — reads LND through the real collector code path. |
 | `backend/scripts/backfill-onchain.mjs` | One-off. Repairs history after a change to what `Reserves` includes. Dry-run by default. |
-| `backend/scripts/reset-data.ts` | `npm run reset:data` — clear gathered data and/or reseed rule defaults. Dry-run by default. |
+| `backend/scripts/reset-data.ts` | `yarn reset:data` — clear gathered data and/or reseed rule defaults. Dry-run by default. |
 
 ## Before trusting reserve figures in production
 
@@ -273,7 +303,7 @@ and nothing else.
 leaving the measurement history alone:
 
 ```bash
-npm run reset:data -- --yes --rules-only
+yarn reset:data --yes --rules-only
 ```
 
 It truncates `RuleConfig` and immediately reseeds by calling the engine's own `loadConfigs`,

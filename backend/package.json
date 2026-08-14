@@ -15,8 +15,8 @@
     "reset:data": "esbuild scripts/reset-data.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/reset-data.js --log-level=warning && node dist/reset-data.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prisma:updateTypes": "npx prisma generate",
-    "prisma:updateDb": "npx prisma db push"
+    "prisma:updateTypes": "prisma generate",
+    "prisma:updateDb": "prisma db push"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

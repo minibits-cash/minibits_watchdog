@@ -25,6 +25,7 @@
     "dev:frontend": "yarn --cwd frontend run dev",
 
     "dev": "yarn dev:backend & yarn dev:frontend & wait",
+    "restart": "pm2 restart minibits_watchdog_backend && pm2 restart minibits_watchdog_frontend",
 
     "db:push": "yarn --cwd backend run prisma:updateDb",
     "db:generate": "yarn --cwd backend run prisma:updateTypes",

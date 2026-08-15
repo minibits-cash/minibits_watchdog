@@ -75,6 +75,54 @@ function count(v: unknown): number {
     return Array.isArray(v) ? v.length : 0
 }
 
+/**
+ * Funds still encumbered in force-closing channels, EXCLUDING HTLCs that have
+ * already matured.
+ *
+ * LND credits a swept HTLC to the on-chain wallet before it removes that HTLC
+ * from `total_limbo_balance` — observed lag, ~15 minutes. Since reserves are
+ * `channelLocal + onchainTotal + limbo`, the same sats sit in two terms for the
+ * duration and reserves are overstated by the swept amount, then drop back.
+ *
+ * That transient is worse than it sounds: the drift rules difference the
+ * ENDPOINTS of a window, so an inflated reading at a window's start poisons
+ * every evaluation until it ages out — a 15-minute artifact produced a 6-hour
+ * CRITICAL alert (observed 2026-08-14 23:02, and again at 01:37).
+ *
+ * `blocksTilMaturity <= 0` is the discriminator: an HTLC past maturity has been
+ * (or is being) swept, so the wallet already accounts for it. Verified against
+ * the real payloads of both incidents — with this applied, the +199,812 and
+ * −200,028 steps collapse to −216, exactly the sweep fee.
+ *
+ * NOT `recoveredBalance`: that is the cumulative total already recovered from
+ * the channel and can exceed `limboBalance` outright, so subtracting it is
+ * meaningless. It tracks limbo down rather than leading it.
+ *
+ * Clamped at zero — a negative reserve component is never a sane reading, and
+ * this is arithmetic across two independently-updated LND fields.
+ */
+function effectiveLimbo(pendingChannels: any): bigint {
+    const total = BigInt(req(pendingChannels, 'totalLimboBalance', 'total_limbo_balance') ?? 0)
+
+    const channels =
+        opt(pendingChannels, 'pendingForceClosingChannels', 'pending_force_closing_channels') ?? []
+
+    let matured = 0n
+    for (const ch of Array.isArray(channels) ? channels : []) {
+        const htlcs = opt(ch, 'pendingHtlcs', 'pending_htlcs') ?? []
+        for (const h of Array.isArray(htlcs) ? htlcs : []) {
+            // Absent maturity data must not be read as "matured" — default to
+            // still-encumbered, which keeps the sats counted rather than
+            // silently dropping them from reserves.
+            const blocks = Number(opt(h, 'blocksTilMaturity', 'blocks_til_maturity') ?? 1)
+            if (blocks <= 0) matured += BigInt(opt(h, 'amount') ?? 0)
+        }
+    }
+
+    const effective = total - matured
+    return effective > 0n ? effective : 0n
+}
+
 export class LndSource implements Source<LndReading> {
     readonly name = 'lnd'
 
@@ -117,7 +165,7 @@ export class LndSource implements Source<LndReading> {
                 opt(walletBalance, 'reservedBalanceAnchorChan', 'reserved_balance_anchor_chan') ?? '0',
             ),
 
-            limbo: satToMsat(req(pendingChannels, 'totalLimboBalance', 'total_limbo_balance')),
+            limbo: satToMsat(effectiveLimbo(pendingChannels)),
             pendingOpenCount: count(opt(pendingChannels, 'pendingOpenChannels', 'pending_open_channels')),
             pendingForceCloseCount: count(
                 opt(pendingChannels, 'pendingForceClosingChannels', 'pending_force_closing_channels'),

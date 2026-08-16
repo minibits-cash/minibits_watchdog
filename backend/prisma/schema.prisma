@@ -139,9 +139,13 @@ model MintSnapshot {
   meltRequestsInFlight     Int
   meltRequestsInputsAmount BigInt
 
-  // On-chain reserves held by the mint's own BDK wallet, derived from CDK's
-  // ledger. Interim: it verifies internal consistency, not custody, because it
-  // reads the same books the watchdog audits.
+  // On-chain reserves as CDK's ledger implies them: paid on-chain mint quotes,
+  // less booked melt payouts, less broadcast-but-unsettled melts.
+  //
+  // No longer the reserve figure when the wallet RPC is configured — it verifies
+  // internal consistency, not custody, because it reads the same books the
+  // watchdog audits. Still collected, because its DIVERGENCE from the measured
+  // wallet balance below is exactly the class of movement CDK never booked.
   onchainBalance   BigInt @default(0)
   onchainDeposits  BigInt @default(0)
   onchainWithdrawn BigInt @default(0)
@@ -159,6 +163,41 @@ model MintSnapshot {
   onchainInflightStaleCount Int?
   /// Age of the oldest in-flight on-chain melt, seconds. Drives the stuck-melt rule.
   onchainInflightOldestSec  Int?
+
+  // ── BDK wallet, measured over CDK's management gRPC (WalletService) ─────────
+  //
+  // The authoritative on-chain reserve figure once MINT_RPC_HOST is set. Unlike
+  // the ledger columns above, these can express a movement CDK never wrote a row
+  // for — an operator sweep, an unbooked fee, a bug — which is the whole reason
+  // to prefer them.
+  //
+  // All nullable, and null means "not measured this tick": either the RPC is not
+  // configured, or the call failed. Zero would assert an empty wallet, and the
+  // difference between an empty wallet and an unread one is the difference
+  // between a solvency alert and a connectivity one.
+  //
+  /// Confirmed and spendable.
+  walletConfirmed        BigInt?
+  /// Unconfirmed change from the wallet's own transactions — ours, just not mined.
+  walletTrustedPending   BigInt?
+  /// Unconfirmed inbound from elsewhere. NOT counted in reserves: still reversible,
+  /// and CDK has not credited the mint quote for it either, so counting it would
+  /// raise assets with no matching liability and read as unexplained drift.
+  walletUntrustedPending BigInt?
+  /// Immature coinbase. Structurally zero for a mint; collected so a non-zero
+  /// value is visible rather than assumed away.
+  walletImmature         BigInt?
+  /// confirmed + trustedPending. This is what reconciliation uses.
+  walletTrustedSpendable BigInt?
+  /// Everything the wallet can see, including untrusted pending.
+  walletTotal            BigInt?
+  /// "bitcoin", "signet", … A mismatch means the watchdog is reading a wallet
+  /// that has nothing to do with the reserves it is reporting on.
+  walletNetwork          String?
+  /// The wallet's own chain tip. Cross-checked against LND's height, which comes
+  /// from a completely independent node — a stalled BDK sync reports a stale
+  /// balance perfectly confidently, and nothing else would reveal it.
+  walletSyncedHeight     Int?
 
   keysetsActive Int
   keysetsTotal  Int
@@ -190,8 +229,23 @@ model Reconciliation {
   totalNodeBalance BigInt
   /// Operator-declared reserves held outside the node (COLD_STORAGE_RESERVES).
   coldStorage      BigInt @default(0)
-  /// On-chain reserves in the mint's own BDK wallet (ledger-derived, interim).
+  /// On-chain reserves in the mint's own BDK wallet — the figure actually used.
+  /// Its basis is recorded alongside, because the two are not interchangeable.
   mintOnchain      BigInt @default(0)
+  /// Which measurement mintOnchain came from: "WALLET" (BDK, measured over gRPC)
+  /// or "LEDGER" (inferred from CDK's books).
+  ///
+  /// Recorded rather than inferred from config, so history stays readable after
+  /// the switch: the changeover puts a one-off step in ownCapital equal to the
+  /// divergence between the two bases, and a year from now this column is the
+  /// only thing that explains it. Null on rows written before the column existed.
+  mintOnchainBasis String?
+  /// The ledger-derived figure, kept even when it is not the basis.
+  ///
+  /// Its gap to the measured wallet balance is the alertable quantity: on-chain
+  /// fees CDK never booked, deposits to the wallet outside any mint quote, and
+  /// coins moved out by hand all live in that gap and nowhere else.
+  mintOnchainLedger BigInt?
   /// issued − redeemed. Purely measured — declared adjustments never fold in here.
   mintBalance      BigInt
   /// Operator-declared issued ecash that can never be redeemed

@@ -11,6 +11,7 @@
     "start:prod": "node dist/index.js",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "probe:lnd": "esbuild scripts/probe-lnd.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/probe-lnd.js --log-level=warning && node dist/probe-lnd.js",
+    "probe:mint-rpc": "esbuild scripts/probe-mint-rpc.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/probe-mint-rpc.js --log-level=warning && node dist/probe-mint-rpc.js",
     "sql": "node scripts/run-sql.mjs",
     "reset:data": "esbuild scripts/reset-data.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/reset-data.js --log-level=warning && node dist/reset-data.js",
     "test": "vitest run",
@@ -20,6 +21,8 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
+    "@grpc/grpc-js": "1.10.8",
+    "@grpc/proto-loader": "0.7.13",
     "@lightningpolar/lnd-api": "^0.19.0-beta",
     "@prisma/client": "^6.13.0",
     "date-fns": "^4.1.0",

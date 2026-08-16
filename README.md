@@ -207,6 +207,7 @@ Frontend (`frontend/.env.local`), both read at server start — restart, no rebu
 | `scripts/verify-mint-accounting.sql` | Full ledger cross-check. **Scans the two largest tables** — see below. |
 | `backend/scripts/run-sql.mjs` | Runs a single-statement `.sql` file through the app's own read-only path. |
 | `backend/scripts/probe-lnd.ts` | `yarn probe:lnd` — reads LND through the real collector code path. |
+| `backend/scripts/probe-mint-rpc.ts` | `yarn probe:mint-rpc` — reads the BDK wallet balance and prints it beside the ledger estimate it replaces. Run before switching bases. |
 | `backend/scripts/backfill-onchain.mjs` | One-off. Repairs history after a change to what `Reserves` includes. Dry-run by default. |
 | `backend/scripts/reset-data.ts` | `yarn reset:data` — clear gathered data and/or reseed rule defaults. Dry-run by default. |
 
@@ -221,33 +222,82 @@ Frontend (`frontend/.env.local`), both read at server start — restart, no rebu
 3. **Compare the first production `Own capital` against your tracking spreadsheet** — the
    end-to-end sanity check on the whole chain.
 
-### Known limitation: on-chain reserves
+### On-chain reserves: two bases
 
-The mint's own on-chain (BDK) wallet balance is currently **derived from CDK's ledger**,
-because CDK does not yet expose the wallet. It therefore verifies internal consistency,
-**not custody** — it cannot detect on-chain funds going missing, and it misses any
-on-chain fee paid outside a melt, so it drifts upward relative to reality. Replace it with
-direct wallet access when CDK exposes one.
+The mint's own on-chain (BDK) wallet balance can come from either of two places, and they
+are not interchangeable. Which one is in use is printed in the startup banner and recorded
+on every row in `Reconciliation.mintOnchainBasis`.
 
-**In-flight melts are corrected for.** A committed on-chain melt has left the wallet at
-broadcast, but `completed_operations` gets no row until settlement — so the estimate
-subtracts `melt_quote.amount + fee_reserve` for melts still `PENDING`. Lightning needs no
-such correction: LND's `local_balance` drops the moment the HTLC is sent, which is the
-whole reason the two rails behaved differently. The subtracted quantity equals
-`melt_request.inputs_amount`, exactly what `+ Proofs pending` adds back, so own capital
-stays flat across the melt. Measured on a real 800,000 sat melt: without it, own capital
-spiked +801,828 for 26 minutes and fell back; with it, the step is 63 sat.
+| | **WALLET** (`MINT_RPC_HOST` set) | **LEDGER** (fallback) |
+|---|---|---|
+| Source | `WalletService.GetBalance` over CDK's management gRPC | Paid on-chain mint quotes, less booked payouts |
+| Measures | the wallet | CDK's books |
+| Detects an unbooked outflow | yes | **no** |
+
+The LEDGER basis verifies internal consistency, **not custody**. It moves only when CDK
+writes a row, so coins leaving the wallet by any route CDK did not book — a manual sweep,
+an on-chain fee outside a melt, a bug — do not move it at all. Since undeclared outflow is
+the single thing this tool exists to catch, that is a blind spot rather than a
+conservative estimate. Configure `MINT_RPC_HOST`.
+
+Verify the endpoint with `yarn probe:mint-rpc` before deploying: it prints the wallet
+balance beside the ledger estimate, and their difference is a **one-off step in own
+capital** at the changeover. Above ~96,000 sat that step trips `reserve_drift_long` once
+and then ages out of the 48h window by itself.
+
+**The WALLET basis uses `trusted_spendable` (confirmed + own unconfirmed change), not
+`total` and not `confirmed`.** Each exclusion pays for itself:
+
+- *Not `total`* — that adds `untrusted_pending`, inbound value that is still reversible
+  and that CDK has not credited to a mint quote. Counting it would raise assets with no
+  matching liability and read as unexplained drift until it confirmed.
+- *Not bare `confirmed`* — an on-chain melt consumes a confirmed UTXO and returns the
+  change as `trusted_pending`. Excluding it would drop reserves by the whole input for one
+  block rather than by the payout, which for a large UTXO paying a small melt is a
+  several-hundred-thousand-sat phantom deficit.
+
+One residual transient remains on the incoming side, and it depends on the mint's
+`[bdk] num_confs`. A deposit enters `confirmed` at 1 confirmation but `amount_paid` — and
+therefore `Unclaimed` — only rises at `num_confs`. In the gap, reserves are up with
+nothing explaining them. It is a positive delta, so it cannot trip the drift rules
+directly, but the same observation sitting at a window's *start* shows as a matching
+negative. At `num_confs = 1` the gap does not exist; above that it needs a single deposit
+over ~96,000 sat to reach a threshold.
+
+**In-flight melts are corrected for on the LEDGER basis only.** A committed on-chain melt
+has left the wallet at broadcast, but `completed_operations` gets no row until settlement
+— so the estimate subtracts `melt_quote.amount + fee_reserve` for melts still `PENDING`.
+Lightning needs no such correction: LND's `local_balance` drops the moment the HTLC is
+sent, which is the whole reason the two rails behaved differently. The subtracted quantity
+equals `melt_request.inputs_amount`, exactly what `+ Proofs pending` adds back, so own
+capital stays flat across the melt. Measured on a real 800,000 sat melt: without it, own
+capital spiked +801,828 for 26 minutes and fell back; with it, the step is 63 sat.
+
+The WALLET basis needs none of this — the real wallet already reflects a broadcast spend,
+exactly as LND does, so applying the correction there would double-count.
 
 Melts in flight longer than `INFLIGHT_MELT_MAX_AGE_SEC` (24h) are **not** subtracted —
 a dropped transaction returns the funds, which would make the correction a permanent
 understatement. Those raise `mint_onchain_melt_stuck` instead, because while one is
-outstanding the on-chain figure may be overstated by up to that amount.
+outstanding the ledger estimate may be overstated by up to that amount.
 
-> When CDK exposes BDK directly, **remove this correction** — the real wallet already
-> reflects broadcast spends, so keeping it would double-count. Prefer BDK's *confirmed*
-> balance: `mint_quote.amount_paid` is set at 1 confirmation, and a total including 0-conf
-> deposits would raise reserves before `Unclaimed` rises, producing the mirror-image
-> false drift on the incoming side.
+**The ledger estimate is still collected on the WALLET basis**, into
+`Reconciliation.mintOnchainLedger`. Its gap to the measured balance is where every
+movement CDK failed to book has to show up, so `mint_wallet_ledger_divergence` watches
+that gap *change*. The level itself is meaningless — the ledger accumulator was seeded
+from a watermark rather than from the wallet's first transaction, so a large constant
+offset is expected.
+
+**If the wallet RPC is configured but does not answer, no reconciliation row is written
+for that tick.** The ledger estimate is deliberately *not* substituted: a silent basis
+change steps own capital by the divergence between the two and steps back when the
+endpoint recovers, manufacturing drift in both directions every time it flaps. A gap is
+honest; `mint_wallet_rpc_unreachable` fires CRITICAL because reserve drift is not being
+evaluated while it holds.
+
+> **Any change to what `Reserves` includes creates a step that reads as unexplained drift.**
+> Either backfill history (`backend/scripts/backfill-onchain.mjs`) or record the change as
+> a declared term — never let it land silently in `Remaining delta`.
 
 > **Any change to what `Reserves` includes creates a step that reads as unexplained drift.**
 > Either backfill history (`backend/scripts/backfill-onchain.mjs`) or record the change as

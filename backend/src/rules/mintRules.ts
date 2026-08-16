@@ -1,4 +1,5 @@
 import { Rule, RuleFinding, formatSat, numParam, satParam } from './types'
+import { config } from '../config'
 
 export const mintUnreachable: Rule = {
     id: 'mint_unreachable',
@@ -273,6 +274,244 @@ export const onchainMeltStuck: Rule = {
     },
 }
 
+/**
+ * The BDK wallet balance could not be read, so reconciliation has no on-chain
+ * asset figure and writes no row at all.
+ *
+ * CRITICAL because of that consequence rather than the failure itself: while
+ * this fires, the reserve drift rules have nothing to evaluate and the mint is
+ * effectively unmonitored for solvency. The deadman's switch does not cover it —
+ * the watchdog is alive, ticking, and reporting healthily; it is simply blind on
+ * one side, which is the more dangerous of the two states.
+ *
+ * Deliberately NOT resolved by substituting the ledger estimate. See
+ * reconciliation.ts: a silent basis change steps own capital by the divergence
+ * between the two and reads as drift.
+ */
+export const walletRpcUnreachable: Rule = {
+    id: 'mint_wallet_rpc_unreachable',
+    description: "The mint's BDK wallet balance could not be read over gRPC",
+    defaults: {
+        severity: 'CRITICAL',
+        // ~15 minutes at the default cadence. A mintd restart is seconds; this
+        // waits for something that is actually an outage.
+        forEvaluations: 3,
+        clearEvaluations: 1,
+        cooldownSeconds: 3600,
+        notifyOnResolve: true,
+    },
+    async evaluate({ observation }) {
+        // Not configured at all is a deployment choice, warned about in the
+        // startup banner, not an alert on every tick forever.
+        if (!config.mintRpc.enabled) return null
+        if (!observation.mints?.length) return null
+
+        for (const m of observation.mints) {
+            if (m.unit !== config.backingUnit) continue
+            if (m.walletTrustedSpendable !== null) return []
+
+            const raw = (m.raw ?? {}) as any
+            return [
+                {
+                    dedupeKey: m.unit,
+                    title: 'Mint BDK wallet balance unreadable',
+                    detail:
+                        `${String(raw?.walletRpc?.error ?? 'no error recorded')}. ` +
+                        `No reconciliation row is being written while this holds, so reserve drift ` +
+                        `is not being evaluated. Check cdk-mintd's management RPC listener ` +
+                        `(${config.mintRpc.host}:${config.mintRpc.port}) and any tunnel in front of it.`,
+                    context: { unit: m.unit, target: `${config.mintRpc.host}:${config.mintRpc.port}` },
+                },
+            ]
+        }
+        return null
+    },
+}
+
+/**
+ * The gap between the measured BDK wallet balance and what CDK's ledger implies
+ * it should be — and specifically, that gap CHANGING.
+ *
+ * The level is not alertable and never will be: the ledger accumulator was
+ * seeded from a watermark rather than from genesis, so a constant historical
+ * offset is expected and means nothing. What means something is the gap moving,
+ * because everything that can move it is something CDK did not write a row for:
+ *
+ *   gap falling  — value left the wallet unbooked (a manual sweep, an on-chain
+ *                  fee CDK did not account, a failed melt that still spent)
+ *   gap rising   — value arrived outside any mint quote, so the mint holds coins
+ *                  it has issued nothing against
+ *
+ * Partly overlapping with reserve drift, deliberately. Drift says the total
+ * moved; this says which pool, and it catches the rising case that drift is
+ * structurally unable to flag as a problem.
+ *
+ * Both endpoints must be on the WALLET basis. Comparing across the changeover
+ * would measure the switch itself.
+ */
+export const walletLedgerDivergence: Rule = {
+    id: 'mint_wallet_ledger_divergence',
+    description: "BDK wallet balance is drifting away from CDK's ledger",
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 3,
+        clearEvaluations: 3,
+        cooldownSeconds: 21_600,
+        params: {
+            windowHours: 24,
+            minSamples: 12,
+            // Uncalibrated, and set wide on purpose (SPEC §12 step 9). Nothing in
+            // the history says what a normal gap movement looks like yet, and a
+            // tight guess would train the operator to dismiss this rule before it
+            // ever had a chance to be right.
+            thresholdSat: 50_000,
+        },
+    },
+    async evaluate({ observation, prisma, params }) {
+        if (!config.mintRpc.enabled) return null
+
+        const unit = config.backingUnit
+        const windowHours = numParam(params, 'windowHours', 24)
+        const minSamples = numParam(params, 'minSamples', 12)
+        const threshold = satParam(params, 'thresholdSat', 50_000)
+
+        const since = new Date(observation.observedAt.getTime() - windowHours * 3_600_000)
+
+        const rows = await prisma.reconciliation.findMany({
+            where: {
+                unit,
+                mintOnchainBasis: 'WALLET',
+                mintOnchainLedger: { not: null },
+                observation: { observedAt: { gte: since } },
+            },
+            orderBy: { id: 'asc' },
+            include: { observation: { select: { observedAt: true } } },
+        })
+
+        if (rows.length < minSamples) return null
+
+        const gapOf = (r: (typeof rows)[number]) => r.mintOnchain - (r.mintOnchainLedger ?? 0n)
+
+        const first = rows[0]
+        const last = rows[rows.length - 1]
+        const change = gapOf(last) - gapOf(first)
+
+        const magnitude = change < 0n ? -change : change
+        if (magnitude < threshold) return []
+
+        const elapsedH =
+            (last.observation.observedAt.getTime() - first.observation.observedAt.getTime()) /
+            3_600_000
+
+        const direction =
+            change < 0n
+                ? 'value left the wallet that CDK never booked'
+                : 'value arrived in the wallet outside any mint quote'
+
+        return [
+            {
+                dedupeKey: unit,
+                title: `Mint on-chain wallet diverging from ledger by ${formatSat(change)} sat over ${windowHours}h`,
+                detail:
+                    `${direction}. Wallet ${formatSat(last.mintOnchain)} sat vs ledger ` +
+                    `${formatSat(last.mintOnchainLedger ?? 0n)} sat — a gap of ` +
+                    `${formatSat(gapOf(last))} sat, which moved ${formatSat(change)} sat across ` +
+                    `${elapsedH.toFixed(1)}h. The level is not the signal; the movement is. ` +
+                    `Threshold ${formatSat(threshold)} sat.`,
+                context: {
+                    unit,
+                    samples: rows.length,
+                    changeSat: (change / 1000n).toString(),
+                    gapSat: (gapOf(last) / 1000n).toString(),
+                },
+            },
+        ]
+    },
+}
+
+/**
+ * Whether the BDK wallet's view of the chain can be trusted at all.
+ *
+ * A stalled sync is the quiet failure here: BDK keeps answering GetBalance with
+ * complete confidence, and the number it returns is simply the balance as of
+ * whenever it stopped following the chain. Nothing in the balance itself says
+ * so. LND's block height is an independent read of the same chain from a
+ * separate daemon, which makes it the cheapest possible check — and it is
+ * already on the observation.
+ *
+ * Network is checked in the same rule because it is the same question asked
+ * once, at a different scale: whether the wallet being measured is the wallet
+ * that actually holds the reserves.
+ */
+export const walletSync: Rule = {
+    id: 'mint_wallet_sync',
+    description: "The mint's BDK wallet is behind the chain, or on the wrong network",
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 3,
+        clearEvaluations: 2,
+        cooldownSeconds: 21_600,
+        notifyOnResolve: true,
+        params: { maxBlocksBehind: 6, expectedNetwork: 'bitcoin' },
+    },
+    async evaluate({ observation, params }) {
+        if (!config.mintRpc.enabled) return null
+        if (!observation.mints?.length) return null
+
+        const maxBehind = numParam(params, 'maxBlocksBehind', 6)
+        const expectedNetwork = String(
+            (params as any)?.expectedNetwork ?? 'bitcoin',
+        ).toLowerCase()
+
+        const findings: RuleFinding[] = []
+
+        for (const m of observation.mints) {
+            if (m.unit !== config.backingUnit) continue
+
+            // Not measured this tick — walletRpcUnreachable owns that case.
+            if (m.walletSyncedHeight === null) return null
+
+            if (m.walletNetwork && m.walletNetwork.toLowerCase() !== expectedNetwork) {
+                findings.push({
+                    dedupeKey: 'network',
+                    severity: 'CRITICAL',
+                    title: `Mint BDK wallet is on "${m.walletNetwork}", expected "${expectedNetwork}"`,
+                    detail:
+                        'The on-chain reserve figure is being read from a wallet on a different ' +
+                        'network, so it describes no real reserves at all. Every reconciliation ' +
+                        'row written while this holds is wrong.',
+                    context: { network: m.walletNetwork, expectedNetwork },
+                })
+            }
+
+            // LND's height is only a reference when LND itself is caught up.
+            const lndHeight = observation.lnd?.syncedToChain ? observation.lnd.blockHeight : null
+            if (lndHeight !== null) {
+                const behind = lndHeight - m.walletSyncedHeight
+                if (behind > maxBehind) {
+                    findings.push({
+                        dedupeKey: 'height',
+                        title: `Mint BDK wallet is ${behind} blocks behind the chain`,
+                        detail:
+                            `Wallet at height ${m.walletSyncedHeight}, LND at ${lndHeight} ` +
+                            `(threshold ${maxBehind}). The balance it reports is as of the wallet's ` +
+                            `height, not now — deposits and spends after that point are missing from ` +
+                            `reserves, and the figure will look stable while being stale.`,
+                        context: {
+                            walletHeight: m.walletSyncedHeight,
+                            lndHeight,
+                            behind,
+                        },
+                    })
+                }
+            }
+            break
+        }
+
+        return findings
+    },
+}
+
 export const mintRules = [
     mintUnreachable,
     mintOverIssued,
@@ -281,4 +520,7 @@ export const mintRules = [
     proofsPendingHigh,
     meltRequestsStuck,
     onchainMeltStuck,
+    walletRpcUnreachable,
+    walletLedgerDivergence,
+    walletSync,
 ]

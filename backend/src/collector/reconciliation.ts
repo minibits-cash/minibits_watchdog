@@ -54,7 +54,36 @@ export async function writeReconciliation(
 
     // The mint's own on-chain wallet is a second asset pool it controls
     // directly, so it belongs in reserves alongside the node's balances.
-    const mintOnchain = mintUnit.onchainBalance
+    //
+    // Two possible bases, and they are NOT interchangeable:
+    //
+    //   WALLET — BDK's own balance over CDK's gRPC. A measurement. Can express a
+    //            movement CDK never booked, which is the point of having it.
+    //   LEDGER — inferred from paid quotes less booked payouts. Self-consistent
+    //            by construction, and therefore blind to exactly that.
+    //
+    // `trustedSpendable` (confirmed + own unconfirmed change), not `total`:
+    // untrusted pending is inbound value that is still reversible AND that CDK
+    // has not credited to a mint quote yet, so counting it would raise assets
+    // with no matching liability and read as unexplained drift until it
+    // confirmed. Symmetrical with excluding in-flight HTLCs on the LND side.
+    //
+    // When the RPC is configured but did not answer this tick, no row is written
+    // at all — see below. Falling back to LEDGER would step own capital by the
+    // divergence between the bases and then step back, manufacturing drift in
+    // both directions every time the endpoint flapped.
+    const usingWallet = config.mintRpc.enabled
+    const mintOnchain = usingWallet ? mintUnit.walletTrustedSpendable : mintUnit.onchainBalance
+
+    if (mintOnchain === null) {
+        log.warn('[reconciliation] BDK wallet balance unavailable, skipping', {
+            unit,
+            note:
+                'the mint RPC is configured, so the ledger estimate is deliberately NOT ' +
+                'substituted — a basis change would read as drift. This tick is a gap.',
+        })
+        return
+    }
 
     const ownCapital =
         totalNode + coldStorage + mintOnchain - mintBalance + provablyUnspendable + proofsPending
@@ -125,6 +154,8 @@ export async function writeReconciliation(
             totalNodeBalance: totalNode,
             coldStorage,
             mintOnchain,
+            mintOnchainBasis: usingWallet ? 'WALLET' : 'LEDGER',
+            mintOnchainLedger: mintUnit.onchainBalance,
             mintBalance,
             provablyUnspendable,
             proofsPending,
@@ -146,6 +177,11 @@ export async function writeReconciliation(
         observationId,
         unit,
         totalNodeSat: (totalNode / 1000n).toString(),
+        mintOnchainSat: (mintOnchain / 1000n).toString(),
+        mintOnchainBasis: usingWallet ? 'WALLET' : 'LEDGER',
+        // Surfaced every tick rather than only when the rule fires: this is the
+        // number that says whether CDK's books still describe the real wallet.
+        mintOnchainLedgerGapSat: ((mintOnchain - mintUnit.onchainBalance) / 1000n).toString(),
         mintBalanceSat: (mintBalance / 1000n).toString(),
         ownCapitalSat: (ownCapital / 1000n).toString(),
         remainingDeltaSat: remainingDelta === null ? null : (remainingDelta / 1000n).toString(),

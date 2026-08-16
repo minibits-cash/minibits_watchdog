@@ -49,6 +49,19 @@ const enabledSources = new Set(
 const lndEnabled = enabledSources.has('lnd')
 const mintEnabled = enabledSources.has('mint')
 
+/**
+ * The mint's management gRPC listener, which since CDK exposed `WalletService`
+ * can report the BDK on-chain wallet balance directly.
+ *
+ * Gated on the host being set rather than on ENABLED_SOURCES, because it is not
+ * a source in its own right — it is a second reading within the mint source, and
+ * an instance pointed at an older mintd has no endpoint to call. The startup
+ * banner states which basis is in use either way, and warns when it is the
+ * ledger estimate, so "not configured" cannot pass unnoticed.
+ */
+const mintRpcHost = optional('MINT_RPC_HOST')
+const mintRpcEnabled = mintEnabled && mintRpcHost !== ''
+
 function requiredIf(enabled: boolean, name: string): string {
     return enabled ? required(name) : optional(name)
 }
@@ -126,6 +139,38 @@ export const config = {
         cert: requiredIf(lndEnabled, 'LND_TLS_CERT'),
     },
 
+    /**
+     * CDK's mint management gRPC endpoint, read for the BDK wallet balance.
+     *
+     * TLS is optional because cdk-mintd's own default is `allow_insecure` on
+     * loopback, and the realistic deployment is either same-host loopback or an
+     * SSH tunnel — both of which already carry the transport security. When
+     * `tlsCa` is set, mutual TLS is used and all three PEM paths are required:
+     * cdk-mintd's TLS mode authenticates the client, so a CA without a client
+     * keypair would simply be rejected at handshake.
+     */
+    mintRpc: {
+        enabled: mintRpcEnabled,
+        host: mintRpcHost,
+        port: intVar('MINT_RPC_PORT', 8086),
+        tlsCaPath: optional('MINT_RPC_TLS_CA'),
+        tlsClientCertPath: optional('MINT_RPC_TLS_CLIENT_CERT'),
+        tlsClientKeyPath: optional('MINT_RPC_TLS_CLIENT_KEY'),
+        /**
+         * Deliberately well inside COLLECT_SOURCE_TIMEOUT_MS. The wallet read is
+         * one call inside the mint source; letting it consume the whole source
+         * budget would take the database figures down with it, and those stay
+         * useful even when the RPC is unreachable.
+         */
+        timeoutMs: intVar('MINT_RPC_TIMEOUT_MS', 5_000),
+        /**
+         * Sent as `x-cdk-protocol-version`. cdk-mintd compares it by exact
+         * string and refuses every request without it, so this is not advisory.
+         * See callMetadata() in mintRpcClient.ts for why it is an env var.
+         */
+        protocolVersion: optional('MINT_RPC_PROTOCOL_VERSION', '1.0.0'),
+    },
+
     collect: {
         intervalMs: intVar('COLLECT_INTERVAL_MS', 300_000),
         sourceTimeoutMs: intVar('COLLECT_SOURCE_TIMEOUT_MS', 20_000),
@@ -185,6 +230,34 @@ export const config = {
     logLevel: optional('LOG_LEVEL', 'info'),
 } as const
 
+// A half-specified TLS setup fails at the first gRPC handshake, minutes after
+// startup and inside a source that is designed to survive its own failures — so
+// it would surface as "wallet RPC unreachable" rather than as the configuration
+// error it is. Checked here instead, where the remedy is unambiguous.
+{
+    const tls = [
+        ['MINT_RPC_TLS_CA', config.mintRpc.tlsCaPath],
+        ['MINT_RPC_TLS_CLIENT_CERT', config.mintRpc.tlsClientCertPath],
+        ['MINT_RPC_TLS_CLIENT_KEY', config.mintRpc.tlsClientKeyPath],
+    ] as const
+    const set = tls.filter(([, v]) => v !== '')
+    if (set.length > 0 && set.length < tls.length) {
+        console.error(
+            `FATAL: mint RPC TLS is partially configured. Set all of ` +
+                `${tls.map(([n]) => n).join(', ')}, or none of them for an insecure ` +
+                `connection (appropriate on loopback or through an SSH tunnel).`,
+        )
+        process.exit(1)
+    }
+    if (set.length > 0 && !config.mintRpc.enabled) {
+        console.error(
+            'FATAL: mint RPC TLS is configured but MINT_RPC_HOST is empty, so the endpoint ' +
+                'would never be contacted. Set MINT_RPC_HOST or clear the TLS variables.',
+        )
+        process.exit(1)
+    }
+}
+
 function maskUrl(url: string): string {
     return url.replace(/:[^:@/]*@/, ':***@')
 }
@@ -219,6 +292,14 @@ export function startupBanner(): string {
     if (!config.sources.mint) {
         warnings.push('Mint source is DISABLED — mint reserves are not being monitored.')
     }
+    if (config.sources.mint && !config.mintRpc.enabled) {
+        warnings.push(
+            'MINT_RPC_HOST is empty — mint on-chain reserves are the LEDGER ESTIMATE, derived from ' +
+                'the same mint database this tool audits. It cannot detect coins leaving the BDK wallet ' +
+                'by any route CDK did not book, which is the outflow most worth catching. Point it at ' +
+                "cdk-mintd's management RPC to measure the wallet directly.",
+        )
+    }
 
     return [
         '',
@@ -231,6 +312,14 @@ export function startupBanner(): string {
         `  mint database    : ${config.mintDatabaseUrl ? `${maskUrl(config.mintDatabaseUrl)} (read-only)` : '(not configured)'}`,
         `  backing unit     : ${config.backingUnit}`,
         `  lnd              : ${config.sources.lnd ? `${config.lnd.host}:${config.lnd.port} (readonly macaroon)` : '(disabled)'}`,
+        `  mint rpc         : ${
+            config.mintRpc.enabled
+                ? `${config.mintRpc.host}:${config.mintRpc.port} (${
+                      config.mintRpc.tlsCaPath ? 'mutual TLS' : 'INSECURE — loopback/tunnel only'
+                  })`
+                : '(not configured)'
+        }`,
+        `  mint on-chain    : ${config.mintRpc.enabled ? 'BDK wallet balance (measured)' : 'CDK ledger estimate (interim)'}`,
         `  collect interval : ${config.collect.intervalMs / 1000}s`,
         `  notifiers        : ${
             [config.notifiers.ntfy ? 'ntfy' : null, config.notifiers.email ? 'email' : null]

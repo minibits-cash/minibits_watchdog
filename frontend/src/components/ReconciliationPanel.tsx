@@ -71,35 +71,83 @@ export function ReconciliationPanel({
                   value={r.coldStorage}
                   note="declared via COLD_STORAGE_RESERVES"
                 />
+                {/*
+                  Two possible bases with very different standing, so the label
+                  says which one produced the number rather than leaving the
+                  reader to assume the better of the two.
+                */}
                 <SubRow
-                  label="Mint on-chain wallet (BDK)"
+                  label={
+                    r.mintOnchainBasis === 'WALLET'
+                      ? 'Mint on-chain wallet (BDK, measured)'
+                      : 'Mint on-chain wallet (BDK, ledger estimate)'
+                  }
                   value={r.mintOnchain}
                   note={
-                    mint
-                      ? `${mint.onchainQuotes} quotes · ledger-derived, interim`
-                      : 'ledger-derived, interim'
+                    r.mintOnchainBasis === 'WALLET'
+                      ? `confirmed + own unconfirmed change${
+                          mint?.walletSyncedHeight ? ` · synced to ${mint.walletSyncedHeight}` : ''
+                        }`
+                      : `${mint?.onchainQuotes ?? 0} quotes · inferred from CDK's books`
                   }
                 />
-                {/*
-                  Shown as already-applied, not as a term to subtract: it is part
-                  of the wallet-balance estimate above. Lightning has no
-                  counterpart because LND's local_balance drops at HTLC send.
-                */}
-                {mint?.onchainInflight && BigInt(mint.onchainInflight) > 0n ? (
-                  <SubRow
-                    label="↳ less on-chain melts in flight"
-                    value={mint.onchainInflight}
-                    muted
-                    note={`${mint.onchainInflightCount} broadcast, unsettled · already deducted above`}
-                  />
-                ) : null}
-                {mint?.onchainInflightStale && BigInt(mint.onchainInflightStale) > 0n ? (
-                  <SubRow
-                    label="↳ stuck beyond trust window"
-                    value={mint.onchainInflightStale}
-                    note={`${mint.onchainInflightStaleCount} melt(s) · NOT deducted — figure may be overstated`}
-                  />
-                ) : null}
+
+                {r.mintOnchainBasis === 'WALLET' ? (
+                  <>
+                    {/*
+                      Present but excluded, and worth showing precisely because
+                      of that: it is real inbound value, so a reader comparing
+                      this panel against `cdk-mint-cli get-wallet-balance` would
+                      otherwise find an unexplained shortfall.
+                    */}
+                    {mint?.walletUntrustedPending &&
+                    BigInt(mint.walletUntrustedPending) > 0n ? (
+                      <SubRow
+                        label="↳ plus untrusted pending (inbound)"
+                        value={mint.walletUntrustedPending}
+                        muted
+                        note="unconfirmed and reversible · EXCLUDED — no mint quote credited yet"
+                      />
+                    ) : null}
+
+                    {/*
+                      The cross-check. The gap's LEVEL is meaningless — the ledger
+                      accumulator was seeded from a watermark, not from genesis —
+                      so it is shown muted, while the rule alerts on it moving.
+                    */}
+                    {mint?.onchainBalance ? (
+                      <SubRow
+                        label="↳ vs CDK ledger estimate"
+                        value={mint.onchainBalance}
+                        muted
+                        note={ledgerGapNote(r.mintOnchain, r.mintOnchainLedger)}
+                      />
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    {/*
+                      Only meaningful on the LEDGER basis. The measured wallet
+                      already reflects a broadcast spend, exactly as LND does, so
+                      subtracting in-flight melts from it would double-count.
+                    */}
+                    {mint?.onchainInflight && BigInt(mint.onchainInflight) > 0n ? (
+                      <SubRow
+                        label="↳ less on-chain melts in flight"
+                        value={mint.onchainInflight}
+                        muted
+                        note={`${mint.onchainInflightCount} broadcast, unsettled · already deducted above`}
+                      />
+                    ) : null}
+                    {mint?.onchainInflightStale && BigInt(mint.onchainInflightStale) > 0n ? (
+                      <SubRow
+                        label="↳ stuck beyond trust window"
+                        value={mint.onchainInflightStale}
+                        note={`${mint.onchainInflightStaleCount} melt(s) · NOT deducted — figure may be overstated`}
+                      />
+                    ) : null}
+                  </>
+                )}
               </>
             ) : null
           }
@@ -372,6 +420,24 @@ function unclaimedSplit(total: string, onchain: string | null | undefined): stri
   if (ln <= 0n) return `${base} · all on-chain`
 
   return `${base} · Lightning ${formatSat(ln.toString())} · on-chain ${formatSat(onchain)}`
+}
+
+/**
+ * Note line for the wallet-vs-ledger cross-check.
+ *
+ * States the gap without editorialising on its size. A large constant gap is
+ * expected — the ledger accumulator was seeded from a watermark rather than from
+ * the wallet's first transaction — so calling it out as a problem here would be
+ * wrong, and would compete with the rule that watches the thing that does
+ * matter: the gap changing.
+ */
+function ledgerGapNote(wallet: string, ledger: string | null | undefined): string {
+  if (ledger === null || ledger === undefined) return 'cross-check · not recorded'
+
+  const gap = BigInt(wallet) - BigInt(ledger)
+  if (gap === 0n) return 'cross-check · in exact agreement'
+
+  return `cross-check · wallet is ${formatSat(gap.toString())} vs the books — alertable when this MOVES`
 }
 
 function OfWhich({ label, value, note }: { label: string; value: string; note?: string }) {

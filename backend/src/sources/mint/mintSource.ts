@@ -18,6 +18,7 @@ import {
     ledgerSum,
     ledgerMaxId,
 } from './mintQueries'
+import { readWalletBalance, MintWalletBalance } from './mintRpcClient'
 
 /** Watermark keys for the on-chain accumulators. */
 const ONCHAIN_DISCOVERY = 'onchain_quote_discovery'
@@ -114,6 +115,29 @@ export interface MintUnitReading {
     /** Age of the oldest in-flight on-chain melt, seconds. 0 when none. */
     onchainInflightOldestSec: number
     onchainQuotes: number
+
+    /**
+     * The BDK wallet's own balance, read over CDK's management gRPC endpoint.
+     *
+     * Null throughout when MINT_RPC_HOST is unset, and null on the ticks where
+     * the call failed — the two are distinguished by `walletError` on the
+     * MintReading, not here. Null on non-backing units always: there is one
+     * on-chain wallet and it is denominated in sat, so attributing it to another
+     * unit would invent a balance.
+     *
+     * NEVER falls back to the ledger estimate. Silently swapping the basis
+     * mid-series would step own capital by the divergence between them and read
+     * as drift, in both directions, every time the RPC flapped.
+     */
+    walletConfirmed: bigint | null
+    walletTrustedPending: bigint | null
+    walletUntrustedPending: bigint | null
+    walletImmature: bigint | null
+    walletTrustedSpendable: bigint | null
+    walletTotal: bigint | null
+    walletNetwork: string | null
+    walletSyncedHeight: number | null
+
     sagasInFlight: number
     meltRequestsInFlight: number
     meltRequestsInputsAmount: bigint
@@ -125,6 +149,12 @@ export interface MintReading {
     /** Tables the role cannot read, or that we did not expect to exist. */
     unreadableTables: string[]
     knownTables: string[]
+    /**
+     * Why the wallet RPC produced nothing this tick. Null when it succeeded, and
+     * null when it is not configured at all — `config.mintRpc.enabled` separates
+     * those two, and only the first is a fault.
+     */
+    walletError: string | null
 }
 
 /**
@@ -192,6 +222,26 @@ const EXPECTED_TABLES = new Set([
     'saga_state',
 ])
 
+/**
+ * Spread the wallet reading into a snapshot, or a full set of nulls.
+ *
+ * Written as one helper so the absent case cannot be partially filled: a mix of
+ * real fields and zeroed ones would be indistinguishable from a wallet that
+ * genuinely holds nothing.
+ */
+function walletFields(w: MintWalletBalance | null) {
+    return {
+        walletConfirmed: w?.confirmed ?? null,
+        walletTrustedPending: w?.trustedPending ?? null,
+        walletUntrustedPending: w?.untrustedPending ?? null,
+        walletImmature: w?.immature ?? null,
+        walletTrustedSpendable: w?.trustedSpendable ?? null,
+        walletTotal: w?.total ?? null,
+        walletNetwork: w?.network ?? null,
+        walletSyncedHeight: w?.syncedHeight ?? null,
+    }
+}
+
 export class MintSource implements Source<MintReading> {
     readonly name = 'mint'
 
@@ -241,6 +291,22 @@ export class MintSource implements Source<MintReading> {
             ])
 
         const onchain = await this.onchainBalance()
+
+        // Read alongside the database rather than inside it: the RPC is a
+        // different process with a different failure mode, and losing the whole
+        // mint snapshot because mintd's management listener is down would
+        // discard figures that are still perfectly good.
+        let wallet: MintWalletBalance | null = null
+        let walletError: string | null = null
+
+        if (config.mintRpc.enabled) {
+            try {
+                wallet = await readWalletBalance()
+            } catch (e: any) {
+                walletError = String(e?.message ?? e)
+                log.warn('[MintSource] BDK wallet RPC read failed', { message: walletError })
+            }
+        }
 
         const keysetRows: KeysetRow[] = (breakdown.rows as any[]).map((k) => ({
             keysetId: String(k.keyset_id),
@@ -315,6 +381,9 @@ export class MintSource implements Source<MintReading> {
                 onchainInflightOldestSec:
                     row.unit === config.backingUnit ? onchain.inflightOldestSec : 0,
                 onchainQuotes: row.unit === config.backingUnit ? onchain.quotes : 0,
+
+                ...walletFields(row.unit === config.backingUnit ? wallet : null),
+
                 sagasInFlight: Number(t.sagas ?? 0),
                 meltRequestsInFlight: Number(t.melt_requests ?? 0),
                 meltRequestsInputsAmount: satToMsat(t.melt_request_inputs ?? 0),
@@ -343,6 +412,9 @@ export class MintSource implements Source<MintReading> {
                 transient: t,
                 unknownTables,
                 unreadableTables,
+                walletRpc: config.mintRpc.enabled
+                    ? { ok: wallet !== null, error: walletError }
+                    : { configured: false },
             }
         }
 
@@ -357,6 +429,7 @@ export class MintSource implements Source<MintReading> {
             units: [...byUnit.values()],
             unreadableTables,
             knownTables: access.rows.map((r: any) => String(r.table_name)),
+            walletError,
         }
     }
 

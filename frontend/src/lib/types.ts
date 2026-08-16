@@ -53,6 +53,24 @@ export interface MintSnapshot {
   onchainInflightStaleCount: number | null
   onchainInflightOldestSec: number | null
   onchainQuotes: number
+
+  /**
+   * The BDK wallet as measured over CDK's gRPC endpoint.
+   *
+   * Null means NOT MEASURED — either MINT_RPC_HOST is unset, or the call failed
+   * on that tick. Never rendered as zero: an unread wallet and an empty one are
+   * different findings.
+   */
+  walletConfirmed: Msat | null
+  walletTrustedPending: Msat | null
+  /** Inbound and still reversible. Excluded from reserves — shown, not added. */
+  walletUntrustedPending: Msat | null
+  walletImmature: Msat | null
+  /** confirmed + trustedPending — the figure reserves actually use. */
+  walletTrustedSpendable: Msat | null
+  walletTotal: Msat | null
+  walletNetwork: string | null
+  walletSyncedHeight: number | null
   unclaimedMintQuotes: Msat
   /**
    * On-chain share of unclaimedMintQuotes. Already inside it — a breakdown, not a
@@ -74,6 +92,10 @@ export interface Reconciliation {
   totalNodeBalance: Msat
   coldStorage: Msat
   mintOnchain: Msat
+  /** Where mintOnchain came from. Null on rows written before the column existed. */
+  mintOnchainBasis: 'WALLET' | 'LEDGER' | null
+  /** The ledger estimate, kept as a cross-check even when WALLET is the basis. */
+  mintOnchainLedger: Msat | null
   mintBalance: Msat
   /** Declared issued ecash that can never be redeemed. Added to own capital. */
   provablyUnspendable: Msat

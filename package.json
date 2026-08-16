@@ -32,6 +32,7 @@
     "db:generate": "yarn --cwd backend run prisma:updateTypes",
     "reset:data": "yarn --cwd backend run reset:data",
     "probe:lnd": "yarn --cwd backend run probe:lnd",
+    "probe:mint-rpc": "yarn --cwd backend run probe:mint-rpc",
     "sql": "yarn --cwd backend run sql"
   }
 }

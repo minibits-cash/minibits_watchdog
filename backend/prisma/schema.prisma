@@ -194,6 +194,17 @@ model MintSnapshot {
   /// "bitcoin", "signet", … A mismatch means the watchdog is reading a wallet
   /// that has nothing to do with the reserves it is reporting on.
   walletNetwork          String?
+
+  /// Confirmed deposits the mint owes ecash for, which CDK has not yet booked as
+  /// `amount_paid`. A liability — see Reconciliation.depositsAwaitingCredit.
+  depositsAwaitingCredit      BigInt?
+  depositsAwaitingCreditCount Int?
+  /// Confirmed deposits with NO matching mint quote: operator liquidity moved
+  /// into the wallet. Explicitly NOT a liability — the mint owes ecash to nobody
+  /// for these — so they raise own capital rather than unclaimed.
+  depositsUnattributed        BigInt?
+  depositsUnattributedCount   Int?
+
   /// The wallet's own chain tip. Cross-checked against LND's height, which comes
   /// from a completely independent node — a stalled BDK sync reports a stale
   /// balance perfectly confidently, and nothing else would reveal it.
@@ -260,6 +271,21 @@ model Reconciliation {
   ownCapital       BigInt
   unclaimed        BigInt
 
+  /// On-chain deposits confirmed in the BDK wallet that CDK has not yet booked
+  /// as `amount_paid`.
+  ///
+  /// The mint owes ecash for these the moment they confirm, but `unclaimed` is
+  /// derived from CDK's books and cannot know that yet. Without this term the
+  /// asset is recognised before the matching liability, and any window starting
+  /// inside the lag sees the ecash created against a deposit it never saw
+  /// arrive — measured at −420,000 sat on 2026-08-16, a false CRITICAL.
+  ///
+  /// Subtracted in remainingDelta exactly like `unclaimed`, because it IS
+  /// unclaimed; the two differ only in which side of CDK's bookkeeping they sit.
+  /// Kept as its own column rather than folded in so `unclaimed` stays a pure
+  /// reading of the mint database.
+  depositsAwaitingCredit BigInt @default(0)
+
   /// Cumulative mint input fees (keyset_amounts.fee_collected).
   ///
   /// Mint fees are taken by BURNING the wallet's ecash: inputs exceed outputs, so
@@ -275,6 +301,10 @@ model Reconciliation {
   elapsedMs         Int?
   deltaOwnCapital   BigInt?
   deltaUnclaimed    BigInt?
+  /// Change in deposits awaiting credit. Subtracted alongside deltaUnclaimed —
+  /// the two are the same liability either side of CDK booking it, so a deposit
+  /// moving from one to the other must net to zero.
+  deltaDepositsAwaitingCredit BigInt?
   /// Change in declared cold-storage reserves. Subtracted below because an
   /// operator-declared movement is *explained* — without this, editing
   /// COLD_STORAGE_RESERVES would step ownCapital and read as drift.
@@ -441,6 +471,75 @@ model MintOnchainQuote {
   discoveredAt DateTime @default(now())
 
   @@index([createdTime])
+}
+
+/// Transactions of the mint's BDK wallet, cached with their classification.
+///
+/// Cached rather than recomputed because classification costs a chain lookup and
+/// the answer never changes: which addresses a confirmed transaction paid is
+/// settled forever once it is in a block. At the observed rate (~3 inbound per
+/// day) the steady-state cost is a handful of lookups a day.
+///
+/// The classification is what makes the reconciliation identity hold across an
+/// on-chain deposit. Value entering the wallet is one of three things, and they
+/// have completely different accounting:
+///
+///   MINT_QUOTE   — paid to an address belonging to an on-chain mint quote. The
+///                  mint owes ecash for it, so it counts as unclaimed from the
+///                  moment it confirms, NOT from when CDK gets round to booking
+///                  it. That lag was 15 minutes on 2026-08-16 and produced a
+///                  false CRITICAL six hours later.
+///   UNATTRIBUTED — no matching quote. Operator liquidity, from outside the
+///                  monitored perimeter or from the LND wallet. No liability, so
+///                  it must never touch unclaimed.
+///   PENDING      — not classified yet: no chain source configured, or the
+///                  lookup failed. Treated as MINT_QUOTE for a bounded period,
+///                  which is the conservative direction.
+model MintWalletTx {
+  txid String @id
+
+  receivedSat     BigInt
+  sentSat         BigInt
+  balanceDeltaSat BigInt
+
+  confirmationHeight Int?
+  confirmationTime   Int?
+
+  /// When the watchdog first saw it. Drives the large-movement events, which
+  /// must fire once on arrival rather than for as long as the row exists.
+  firstObservedAt DateTime @default(now())
+
+  /// PENDING | MINT_QUOTE | UNATTRIBUTED | OUTGOING
+  classification String  @default("PENDING")
+  /// Txids this transaction spent from. Outgoing transactions only.
+  ///
+  /// Exists to detect a dusting attack completing. Deposit addresses are free to
+  /// harvest — on-chain mint quotes are unauthenticated, so anyone can request
+  /// one and be handed a fresh address without any xpub — and a dust payment to
+  /// one is worthless to the sender until the mint's wallet SPENDS it. At that
+  /// moment the common-input-ownership heuristic attributes every co-input
+  /// address to the mint. This records the co-spend so it can be noticed.
+  inputTxids       String[] @default([])
+  quoteId        String?
+  matchedAddress String?
+  /// The output index that paid the quote address. With it, the credited check
+  /// is an equality lookup on mint_quote_payments' unique payment_id
+  /// (`txid:vout`) rather than a prefix scan whose correctness would depend on
+  /// the database's collation ordering punctuation the way we assume.
+  matchedVout    Int?
+  classifiedAt   DateTime?
+  classifyError  String?
+  /// Bounded so a permanently unlookup-able transaction cannot be retried every
+  /// tick forever.
+  classifyAttempts Int @default(0)
+
+  /// Set once CDK has booked a payment for matchedVout. Until then the value is
+  /// in the wallet but not in the mint's books, which is exactly the gap this
+  /// table exists to close.
+  creditedAt DateTime?
+
+  @@index([classification])
+  @@index([firstObservedAt])
 }
 
 /// Discrete observations that are not time series — keyset changes, force-closes,

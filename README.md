@@ -256,13 +256,130 @@ and then ages out of the 48h window by itself.
   block rather than by the payout, which for a large UTXO paying a small melt is a
   several-hundred-thousand-sat phantom deficit.
 
-One residual transient remains on the incoming side, and it depends on the mint's
-`[bdk] num_confs`. A deposit enters `confirmed` at 1 confirmation but `amount_paid` — and
-therefore `Unclaimed` — only rises at `num_confs`. In the gap, reserves are up with
-nothing explaining them. It is a positive delta, so it cannot trip the drift rules
-directly, but the same observation sitting at a window's *start* shows as a matching
-negative. At `num_confs = 1` the gap does not exist; above that it needs a single deposit
-over ~96,000 sat to reach a threshold.
+### Deposit recognition: why `Deposits awaiting credit` exists
+
+A deposit becomes an **asset** when BDK confirms it, but the matching **liability** — the
+ecash the mint now owes — only appears when CDK writes `amount_paid`. Measured on
+2026-08-16, that lag was 15 minutes:
+
+| UTC | Event |
+|---|---|
+| 12:02:44 | on-chain mint quote created, 420,000 sat |
+| 12:07:59 | deposit confirms in BDK — asset recognised |
+| 12:23:00 | CDK books the payment — liability recognised |
+| 12:40:07 | ecash issued |
+
+Any 6h window *starting* inside those 15 minutes holds the deposit in reserves at its
+start and then watches ecash be created against it: assets flat, liabilities +420,000.
+That fired a CRITICAL at 18:09:52 and cleared at 18:29:52 — the gap plus six hours, to the
+second. With deposits over the threshold arriving roughly daily, it would have recurred
+roughly daily.
+
+`Deposits awaiting credit` counts a confirmed deposit as unclaimed from the moment it
+confirms, which closes the identity at every step:
+
+```
+deposit confirms   reserves +X, awaiting +X                → remaining 0
+CDK books it       awaiting −X, unclaimed +X               → remaining 0
+ecash issued       unclaimed −X, ecash issued +X, cap −X   → remaining 0
+```
+
+A genuine unbooked outflow still reads as −X, because nothing on the liability side moves
+with it. That is the point of the wallet basis and it is preserved.
+
+### Deposit attribution: the three categories
+
+Value entering the wallet is one of three things, with completely different accounting:
+
+| | Origin | Liability | Treatment |
+|---|---|---|---|
+| **A** | User paying an on-chain mint quote | ecash owed | counts to unclaimed until issued |
+| **B** | Operator, from outside the monitored perimeter | none | raises own capital |
+| **C** | Operator, from the monitored LND on-chain wallet | none | nets to zero across the two pools, less fee |
+
+CDK's wallet RPC cannot tell them apart — `WalletTransaction` has no output addresses and
+`WalletAddress` has no txids, so there is no join. `BITCOIN_RPC_URL` supplies it: one
+`getrawtransaction` gives the output addresses, which are matched against
+`mint_quote.request` (bare bech32, unique-indexed). A match is **A**; no match is **B/C**,
+which never touches unclaimed.
+
+Two details that are easy to get wrong:
+
+- **Key on the payment, not the quote.** A quote can receive further payments after it has
+  already been paid and issued against. A quote-keyed event would swallow every payment
+  after the first as a duplicate.
+- **`payment_id` is `txid:vout`.** Because the chain lookup tells us *which* output paid
+  the quote address, the credited check is an equality lookup on that unique index rather
+  than a prefix range whose correctness would depend on how the database's collation
+  orders `:` against digits.
+
+Without a chain source the collector falls back to inference: a deposit is assumed to be
+**A** for 24 hours, then released to own capital. Conservative — it counts value as owed
+rather than as equity, so it cannot manufacture a shortfall — and the release is a
+*positive* step, which no drift rule can fire on.
+
+### An on-chain mint taking hours is normal
+
+Measured across 18 real deposits:
+
+| | min | median | max |
+|---|---|---|---|
+| **confirmed → booked** (`amount_paid`) | 0.3m | 22.6m | **55.1m** |
+| **booked → issued** (`amount_issued`) | −21.9m | 17.1m | **26.2h** |
+
+The second lag is the user: they pay on chain, know the mint wants confirmations, and come
+back when it suits them. It is `Unclaimed`, balanced at both ends, and nothing warns on it.
+*(The negative value is a quote receiving a further payment after an earlier issuance —
+which is why events key on the payment rather than the quote.)*
+
+The first lag is chain-driven and bounded, but its real maximum is what sets the inference
+bound. A one-hour bound would have released a deposit minutes before CDK booked it, and the
+release plus the booking would then have landed in the same window as −X — the exact false
+CRITICAL the term exists to prevent. Bounds go clear of the distribution, not past its
+median.
+
+### Dust deposits and address clustering
+
+On-chain mint quotes are **unauthenticated**. Anyone can request one and be handed a fresh
+deposit address — no xpub involved — so harvesting the mint's addresses costs an attacker
+nothing but API calls.
+
+A deposit below `[bdk] min_receive_amount_sat` is never credited. CDK's check is
+`should_ignore_receive_amount(amount_sat) → amount_sat < min_receive_amount_sat`: it tests
+each receive on its own and **ignores what the quote already holds**, so a small top-up to
+a well-funded quote is refused exactly like a first payment. Confirmed against production —
+18 on-chain payments booked, smallest exactly 10,000, none below.
+
+Such dust is harmless while it sits. It stops being harmless when the wallet **co-spends**
+it: the common-input-ownership heuristic then attributes every other input address in that
+transaction to the mint, and the sender gets a map of the wallet for a few hundred sats.
+`mint_onchain_dust_cospent` reports that moment, reading each outgoing transaction's inputs
+from the chain source. Preventing it is coin control in CDK — excluding sub-minimum UTXOs
+from input selection — not something the watchdog can do.
+
+> **Dust is deliberately NOT special-cased in the accounting.** The obvious change —
+> classify below-minimum deposits as never-creditable and keep them out of the liability
+> side — is asymmetrically dangerous. Get the threshold too high and a deposit CDK *does*
+> credit was excluded, so `unclaimed` jumps with no offset and a false CRITICAL follows.
+> Left alone, dust sits in `Deposits awaiting credit` and ages out, stepping own capital
+> **up**, which no drift rule can fire on. The threshold an operator would reach for is the
+> advertised mint minimum, which is a different setting from the one that actually gates
+> crediting; they coincide today and need not tomorrow.
+
+`mint_onchain_deposit_uncredited` therefore keys on **time, not amount** — a confirmed
+deposit unbooked after 6h, against a measured booking lag of 0.3–55.1 minutes. No threshold
+to configure, and it catches a deposit stuck for a reason nobody has anticipated as readily
+as it catches dust.
+
+`mint_wallet_ledger_divergence` subtracts `Deposits awaiting credit` for the same reason.
+The wallet legitimately leads the books for the whole of lag 1, and a rule that cannot tell
+that from a discrepancy fires on every ordinary mint — it did, on 2026-08-16, against a
+perfectly valid quote.
+
+Ages are measured from **confirmation time**, not from when the watchdog first saw the
+transaction. On the first tick after deployment every historical transaction is new *to
+us*; measured that way, a week of long-since-credited deposits booked 2,528,048 sat of
+fictional liability and would have fired an event apiece.
 
 **In-flight melts are corrected for on the LEDGER basis only.** A committed on-chain melt
 has left the wallet at broadcast, but `completed_operations` gets no row until settlement

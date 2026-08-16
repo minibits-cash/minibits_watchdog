@@ -19,6 +19,7 @@ import {
     ledgerMaxId,
 } from './mintQueries'
 import { readWalletBalance, MintWalletBalance } from './mintRpcClient'
+import { collectOnchainDeposits, WalletMovement } from './onchainDeposits'
 
 /** Watermark keys for the on-chain accumulators. */
 const ONCHAIN_DISCOVERY = 'onchain_quote_discovery'
@@ -138,6 +139,16 @@ export interface MintUnitReading {
     walletNetwork: string | null
     walletSyncedHeight: number | null
 
+    /**
+     * Confirmed on-chain deposits the mint owes ecash for but has not booked.
+     * A liability term — see onchainDeposits.ts. Null when not measurable.
+     */
+    depositsAwaitingCredit: bigint | null
+    depositsAwaitingCreditCount: number | null
+    /** Confirmed deposits with no matching mint quote. NOT a liability. */
+    depositsUnattributed: bigint | null
+    depositsUnattributedCount: number | null
+
     sagasInFlight: number
     meltRequestsInFlight: number
     meltRequestsInputsAmount: bigint
@@ -149,6 +160,8 @@ export interface MintReading {
     /** Tables the role cannot read, or that we did not expect to exist. */
     unreadableTables: string[]
     knownTables: string[]
+    /** Wallet movements this tick, for the large-mint / large-melt events. */
+    movements: WalletMovement[]
     /**
      * Why the wallet RPC produced nothing this tick. Null when it succeeded, and
      * null when it is not configured at all — `config.mintRpc.enabled` separates
@@ -308,6 +321,14 @@ export class MintSource implements Source<MintReading> {
             }
         }
 
+        // Deliberately not gated on the balance read succeeding: the two are
+        // separate calls, and a classification refreshed from cache is still
+        // worth having when only one of them is broken.
+        const deposits = await collectOnchainDeposits()
+        if (deposits.error) {
+            log.warn('[MintSource] wallet transaction read failed', { message: deposits.error })
+        }
+
         const keysetRows: KeysetRow[] = (breakdown.rows as any[]).map((k) => ({
             keysetId: String(k.keyset_id),
             unit: String(k.unit),
@@ -384,6 +405,27 @@ export class MintSource implements Source<MintReading> {
 
                 ...walletFields(row.unit === config.backingUnit ? wallet : null),
 
+                // Like every other on-chain figure, attributed to the backing
+                // unit: there is one BDK wallet and it is denominated in sat.
+                // Null when the wallet RPC is off, so "not measured" stays
+                // distinguishable from "none awaiting credit".
+                depositsAwaitingCredit:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.awaitingCredit
+                        : null,
+                depositsAwaitingCreditCount:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.awaitingCreditCount
+                        : null,
+                depositsUnattributed:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.unattributed
+                        : null,
+                depositsUnattributedCount:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.unattributedCount
+                        : null,
+
                 sagasInFlight: Number(t.sagas ?? 0),
                 meltRequestsInFlight: Number(t.melt_requests ?? 0),
                 meltRequestsInputsAmount: satToMsat(t.melt_request_inputs ?? 0),
@@ -415,6 +457,15 @@ export class MintSource implements Source<MintReading> {
                 walletRpc: config.mintRpc.enabled
                     ? { ok: wallet !== null, error: walletError }
                     : { configured: false },
+                // Only movements inside the freshness window, and only on the
+                // backing unit — this lands in every snapshot's `raw`, so it has
+                // to stay small. The large-mint / large-melt / unattributed
+                // rules read it from here.
+                movements: u.unit === config.backingUnit ? deposits.movements : [],
+                // Small and bounded — the in-flight deposits plus whatever dust
+                // the wallet holds. Carried because the rules that care about
+                // these are precisely the ones a freshness window would hide.
+                uncredited: u.unit === config.backingUnit ? deposits.uncredited : [],
             }
         }
 
@@ -429,7 +480,8 @@ export class MintSource implements Source<MintReading> {
             units: [...byUnit.values()],
             unreadableTables,
             knownTables: access.rows.map((r: any) => String(r.table_name)),
-            walletError,
+            movements: deposits.movements,
+            walletError: walletError ?? deposits.error,
         }
     }
 

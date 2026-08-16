@@ -225,3 +225,73 @@ export const TABLE_ACCESS = `
       AND c.relkind IN ('r', 'p', 'v', 'm')
     ORDER BY c.relname
 `
+
+/**
+ * Which of these addresses belong to an on-chain mint quote?
+ *
+ * The discriminator between a user's mint payment and the operator moving
+ * liquidity. `mint_quote.request` holds the bare deposit address for on-chain
+ * quotes (verified: bech32 P2WPKH, 42 chars) and carries a UNIQUE index, so this
+ * is an index lookup per address rather than a scan.
+ *
+ * Deliberately NOT filtered on quote state. A quote that has already been paid
+ * and issued can receive a FURTHER payment to the same address — CDK allows it,
+ * and a wallet is not prevented from doing it — so restricting to unpaid quotes
+ * would misclassify the second payment as unattributed and drop it out of the
+ * mint's liabilities.
+ */
+export const QUOTE_BY_ADDRESS = `
+    SELECT id, request
+    FROM mint_quote
+    WHERE request = ANY($1)
+      AND payment_method = 'onchain'
+`
+
+/**
+ * Which of these transactions has CDK booked a payment for?
+ *
+ * `payment_id` is `txid:vout` and carries a UNIQUE index, but the vout is not
+ * always known — without a chain source a deposit is never attributed to a
+ * specific output. Matching on the txid prefix answers the question either way,
+ * and a prefix is a range on a btree: EXPLAIN ANALYZE reports an Index Only Scan
+ * at 0.5ms for three txids against 380k rows.
+ *
+ * Written as explicit bounds rather than `LIKE txid || ':%'` because the
+ * pattern is not a constant, so the planner cannot derive index bounds from it
+ * and falls back to a parallel sequential scan (measured: cost 17,849 vs 12).
+ *
+ * ⚠ The bounds assume byte ordering, where ':' (0x3A) precedes ';' (0x3B).
+ * That holds under C / C.UTF-8 / POSIX. Callers must check the collation first
+ * and use PAYMENTS_BOOKED_BY_TXID_PORTABLE otherwise — a locale that sorts
+ * punctuation differently would silently return the wrong set, and "no payment
+ * found" reads as an uncredited deposit, i.e. a liability that never clears.
+ */
+export const PAYMENTS_BOOKED_BY_TXID = `
+    SELECT t.txid
+    FROM unnest($1::text[]) AS t(txid)
+    WHERE EXISTS (
+        SELECT 1 FROM mint_quote_payments p
+        WHERE p.payment_id >= t.txid || ':'
+          AND p.payment_id <  t.txid || ';'
+    )
+`
+
+/**
+ * Collation-independent form of the above. Always correct, never indexed.
+ *
+ * Only reached on a mint database whose collation is not byte-ordered, and only
+ * for the handful of deposits currently awaiting credit, so the sequential scan
+ * is bounded by how many deposits are in flight rather than by table size.
+ */
+export const PAYMENTS_BOOKED_BY_TXID_PORTABLE = `
+    SELECT DISTINCT split_part(payment_id, ':', 1) AS txid
+    FROM mint_quote_payments
+    WHERE split_part(payment_id, ':', 1) = ANY($1)
+`
+
+/**
+ * Is the mint database ordered by byte value?
+ *
+ * Decides which of the two queries above is safe. Read once per process.
+ */
+export const DB_COLLATION = `SELECT current_setting('lc_collate') AS lc_collate`

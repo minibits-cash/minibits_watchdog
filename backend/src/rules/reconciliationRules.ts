@@ -8,8 +8,8 @@ import { config } from '../config'
  * so the number means the same thing regardless of collection interval or a
  * missed sample:
  *
- *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
- *                     − Δ Unspendable ecash − Δ Mint fees
+ *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Deposits awaiting credit
+ *                     − Δ Cold storage − Δ Unspendable ecash − Δ Mint fees
  *   rate            = Remaining delta / elapsed hours
  *
  * Computed from the window endpoints, not by summing per-tick deltas, so gaps in
@@ -60,6 +60,13 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
             const deltaOwnCapital = last.ownCapital - first.ownCapital
             const deltaUnclaimed = last.unclaimed - first.unclaimed
 
+            // The same liability as `unclaimed`, one step before CDK books it.
+            // Omitting it here while reconciliation.ts subtracts it would put the
+            // rule and the stored row back into disagreement — the exact class of
+            // bug that let editing COLD_STORAGE_RESERVES fire a drift alert.
+            const deltaAwaitingCredit =
+                last.depositsAwaitingCredit - first.depositsAwaitingCredit
+
             // The operator-declared terms are subtracted here for the same reason
             // the stored column and /deltas subtract them: revising a declaration
             // steps own capital, and that step is explained, not drift.
@@ -75,6 +82,7 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
             const remaining =
                 deltaOwnCapital -
                 deltaUnclaimed -
+                deltaAwaitingCredit -
                 deltaColdStorage -
                 deltaUnspendable -
                 deltaMintFees
@@ -119,7 +127,10 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
                     detail:
                         `Remaining delta ${formatSat(remaining)} sat across ${(elapsedMs / 3_600_000).toFixed(1)}h. ` +
                         `Expected ${formatSat(expected)} sat/h, alert below ${formatSat(fireBelow)} sat/h. ` +
-                        `Δ own capital ${formatSat(deltaOwnCapital)} sat, Δ unclaimed ${formatSat(deltaUnclaimed)} sat.` +
+                        `Δ own capital ${formatSat(deltaOwnCapital)} sat, Δ unclaimed ${formatSat(deltaUnclaimed)} sat` +
+                        (deltaAwaitingCredit !== 0n
+                            ? `, Δ deposits awaiting credit ${formatSat(deltaAwaitingCredit)} sat.`
+                            : '.') +
                         declaredNote +
                         gapNote,
                     context: {

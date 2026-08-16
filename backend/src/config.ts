@@ -62,6 +62,8 @@ const mintEnabled = enabledSources.has('mint')
 const mintRpcHost = optional('MINT_RPC_HOST')
 const mintRpcEnabled = mintEnabled && mintRpcHost !== ''
 
+const bitcoinRpcUrl = optional('BITCOIN_RPC_URL')
+
 function requiredIf(enabled: boolean, name: string): string {
     return enabled ? required(name) : optional(name)
 }
@@ -171,6 +173,29 @@ export const config = {
         protocolVersion: optional('MINT_RPC_PROTOCOL_VERSION', '1.0.0'),
     },
 
+    /**
+     * bitcoind, used for exactly one question: which addresses did a given
+     * transaction pay?
+     *
+     * That separates a user paying an on-chain mint quote (a liability the mint
+     * owes ecash against) from the operator moving liquidity into the wallet
+     * (no liability at all) — a distinction CDK's wallet RPC cannot express,
+     * because it offers no join between transactions and addresses.
+     *
+     * Optional. Without it the collector infers the same thing from whether a
+     * payment row ever appears, which is conservative rather than wrong but
+     * takes an hour to settle instead of one block.
+     */
+    bitcoinRpc: {
+        enabled: bitcoinRpcUrl !== '',
+        url: bitcoinRpcUrl,
+        user: optional('BITCOIN_RPC_USER'),
+        password: optional('BITCOIN_RPC_PASSWORD'),
+        /** Path to bitcoind's .cookie. Takes precedence over user/password. */
+        cookiePath: optional('BITCOIN_RPC_COOKIE'),
+        timeoutMs: intVar('BITCOIN_RPC_TIMEOUT_MS', 5_000),
+    },
+
     collect: {
         intervalMs: intVar('COLLECT_INTERVAL_MS', 300_000),
         sourceTimeoutMs: intVar('COLLECT_SOURCE_TIMEOUT_MS', 20_000),
@@ -249,6 +274,17 @@ export const config = {
         )
         process.exit(1)
     }
+    if (
+        config.bitcoinRpc.enabled &&
+        !config.bitcoinRpc.cookiePath &&
+        (config.bitcoinRpc.user === '' || config.bitcoinRpc.password === '')
+    ) {
+        console.error(
+            'FATAL: BITCOIN_RPC_URL is set but no credentials are. Provide BITCOIN_RPC_USER and ' +
+                'BITCOIN_RPC_PASSWORD, or BITCOIN_RPC_COOKIE pointing at bitcoind\'s .cookie file.',
+        )
+        process.exit(1)
+    }
     if (set.length > 0 && !config.mintRpc.enabled) {
         console.error(
             'FATAL: mint RPC TLS is configured but MINT_RPC_HOST is empty, so the endpoint ' +
@@ -320,6 +356,11 @@ export function startupBanner(): string {
                 : '(not configured)'
         }`,
         `  mint on-chain    : ${config.mintRpc.enabled ? 'BDK wallet balance (measured)' : 'CDK ledger estimate (interim)'}`,
+        `  chain source     : ${
+            config.bitcoinRpc.enabled
+                ? `${config.bitcoinRpc.url} (${config.bitcoinRpc.cookiePath ? 'cookie' : 'user/pass'}) — deposits classified on arrival`
+                : '(not configured) — deposits classified by inference'
+        }`,
         `  collect interval : ${config.collect.intervalMs / 1000}s`,
         `  notifiers        : ${
             [config.notifiers.ntfy ? 'ntfy' : null, config.notifiers.email ? 'email' : null]

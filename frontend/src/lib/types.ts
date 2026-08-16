@@ -71,6 +71,13 @@ export interface MintSnapshot {
   walletTotal: Msat | null
   walletNetwork: string | null
   walletSyncedHeight: number | null
+
+  /** Confirmed deposits owed ecash that the mint has not booked yet. A liability. */
+  depositsAwaitingCredit: Msat | null
+  depositsAwaitingCreditCount: number | null
+  /** Confirmed deposits matching no mint quote — operator liquidity. NOT a liability. */
+  depositsUnattributed: Msat | null
+  depositsUnattributedCount: number | null
   unclaimedMintQuotes: Msat
   /**
    * On-chain share of unclaimedMintQuotes. Already inside it — a breakdown, not a
@@ -102,9 +109,12 @@ export interface Reconciliation {
   proofsPending: Msat
   ownCapital: Msat
   unclaimed: Msat
+  /** Confirmed on-chain deposits the mint owes ecash for but has not booked. */
+  depositsAwaitingCredit: Msat
   mintFeesCollected: Msat
   deltaOwnCapital: Msat | null
   deltaUnclaimed: Msat | null
+  deltaDepositsAwaitingCredit: Msat | null
   deltaColdStorage: Msat | null
   deltaProvablyUnspendable: Msat | null
   deltaMintFees: Msat | null
@@ -166,6 +176,8 @@ export interface DeltaResponse {
     provablyUnspendable: Msat
     ownCapital: Msat
     unclaimed: Msat
+    /** Same liability as `unclaimed`, before the mint booked it. */
+    depositsAwaitingCredit: Msat
     coldStorage: Msat
     mintFees: Msat
     remaining: Msat

@@ -86,13 +86,35 @@ interface RawBalance {
     synced_height: number
 }
 
-/** Minimal shape of the generated stub — only the method we actually call. */
+interface RawTx {
+    txid: string
+    received_sat: string
+    sent_sat: string
+    fee_sat?: string
+    balance_delta_sat: string
+    confirmation_height?: number
+    confirmation_time?: string
+    first_seen?: string
+}
+
+interface RawTxList {
+    transactions: RawTx[]
+    total: string
+}
+
+/** Minimal shape of the generated stub — only the methods we actually call. */
 interface WalletServiceClient extends grpc.Client {
     GetBalance(
         req: Record<string, never>,
         metadata: grpc.Metadata,
         options: grpc.CallOptions,
         cb: (err: grpc.ServiceError | null, res?: RawBalance) => void,
+    ): void
+    ListTransactions(
+        req: { limit: number; offset: number },
+        metadata: grpc.Metadata,
+        options: grpc.CallOptions,
+        cb: (err: grpc.ServiceError | null, res?: RawTxList) => void,
     ): void
 }
 
@@ -217,6 +239,54 @@ export async function readWalletBalance(): Promise<MintWalletBalance> {
         network: String(res.network ?? ''),
         syncedHeight: Number(res.synced_height ?? 0),
     }
+}
+
+export interface MintWalletTx {
+    txid: string
+    /** msat, like every other amount once past this edge. */
+    receivedMsat: bigint
+    sentMsat: bigint
+    balanceDeltaMsat: bigint
+    confirmationHeight: number | null
+    confirmationTime: number | null
+}
+
+/**
+ * Recent wallet transactions, newest first.
+ *
+ * `limit` is deliberately modest. This is polled every tick only to notice new
+ * transactions — everything already seen is cached in MintWalletTx — so the page
+ * needs to be large enough to cover the busiest plausible interval between
+ * ticks, not the wallet's history.
+ */
+export async function listWalletTransactions(limit = 50): Promise<MintWalletTx[]> {
+    const c = getClient()
+    const deadline = new Date(Date.now() + config.mintRpc.timeoutMs)
+
+    const res = await new Promise<RawTxList>((resolve, reject) => {
+        c.ListTransactions({ limit, offset: 0 }, callMetadata(), { deadline }, (err, value) => {
+            if (err) {
+                reject(new Error(`${err.code ? `${grpc.status[err.code]}: ` : ''}${err.message}`))
+                return
+            }
+            if (!value) {
+                reject(new Error('ListTransactions returned no value'))
+                return
+            }
+            resolve(value)
+        })
+    })
+
+    return (res.transactions ?? []).map((t) => ({
+        txid: String(t.txid),
+        receivedMsat: satToMsat(t.received_sat),
+        sentMsat: satToMsat(t.sent_sat),
+        // Signed, so it cannot go through satToMsat's unsigned assumptions
+        // unexamined — an outgoing transaction's delta is negative.
+        balanceDeltaMsat: BigInt(t.balance_delta_sat ?? 0) * 1000n,
+        confirmationHeight: t.confirmation_height ? Number(t.confirmation_height) : null,
+        confirmationTime: t.confirmation_time ? Number(t.confirmation_time) : null,
+    }))
 }
 
 export function closeMintRpcClient(): void {

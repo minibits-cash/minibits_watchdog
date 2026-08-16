@@ -140,6 +140,7 @@ export async function observationRoutes(app: FastifyInstance) {
         const deltaColdStorage = last.coldStorage - first.coldStorage
         const deltaProvablyUnspendable = last.provablyUnspendable - first.provablyUnspendable
         const deltaMintFees = last.mintFeesCollected - first.mintFeesCollected
+        const deltaAwaitingCredit = last.depositsAwaitingCredit - first.depositsAwaitingCredit
 
         // The asset and liability sides of the same window. Served from here
         // rather than differenced in the browser so every "what changed over N"
@@ -162,12 +163,18 @@ export async function observationRoutes(app: FastifyInstance) {
                 unit: last.unit,
                 ownCapital: deltaOwnCapital,
                 unclaimed: deltaUnclaimed,
+                depositsAwaitingCredit: deltaAwaitingCredit,
                 coldStorage: deltaColdStorage,
                 provablyUnspendable: deltaProvablyUnspendable,
                 mintFees: deltaMintFees,
+                // Must match reconciliation.ts and reconciliationRules.ts term
+                // for term. Three copies of one identity is two too many, but
+                // until they are unified the comment is the guard: change one,
+                // change all three.
                 remaining:
                     deltaOwnCapital -
                     deltaUnclaimed -
+                    deltaAwaitingCredit -
                     deltaColdStorage -
                     deltaProvablyUnspendable -
                     deltaMintFees,

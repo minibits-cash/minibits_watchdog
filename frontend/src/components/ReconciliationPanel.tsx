@@ -172,6 +172,37 @@ export function ReconciliationPanel({
         />
 
         {/*
+          The same liability as the line above, one step earlier: the deposit has
+          confirmed in the wallet, so the mint holds the sats and owes ecash for
+          them, but CDK has not written amount_paid yet.
+
+          Shown separately rather than merged into `unclaimed` because that figure
+          is a pure reading of the mint database and stays checkable against it.
+          Without this term the asset is recognised before the debt, and a drift
+          window starting inside the lag reads the difference as a shortfall.
+        */}
+        {mint?.depositsAwaitingCredit && BigInt(mint.depositsAwaitingCredit) > 0n ? (
+          <OfWhich
+            label="of which awaiting credit"
+            value={mint.depositsAwaitingCredit}
+            note={`${mint.depositsAwaitingCreditCount} on-chain deposit(s) confirmed, mint has not booked them yet`}
+          />
+        ) : null}
+
+        {/*
+          Deliberately NOT an encumbrance: no mint quote claimed these, so the
+          mint owes ecash to nobody for them. They are operator liquidity and
+          belong to own capital, which is why this line is informational.
+        */}
+        {mint?.depositsUnattributed && BigInt(mint.depositsUnattributed) > 0n ? (
+          <OfWhich
+            label="of which unattributed deposits"
+            value={mint.depositsUnattributed}
+            note={`${mint.depositsUnattributedCount} deposit(s) with no mint quote · operator liquidity, counted as equity`}
+          />
+        ) : null}
+
+        {/*
           The declared write-off lives in this bucket, not in Reserves.
 
           It is a carve-out of the liability — issued promises the mint will never

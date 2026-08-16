@@ -10,8 +10,8 @@ import { MintReading } from '../sources/mint/mintSource'
  *   Reserves        = Channel local + On-chain (LND) + Limbo + Cold storage
  *                     + Mint on-chain (BDK)
  *   Own capital     = Reserves − Ecash issued + Unspendable ecash + Proofs pending
- *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
- *                     − Δ Unspendable ecash − Δ Mint fees
+ *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Deposits awaiting credit
+ *                     − Δ Cold storage − Δ Unspendable ecash − Δ Mint fees
  *
  * `Own capital` is the mint's equity: reserves in excess of what it owes. It is
  * a level and carries no signal on its own, being accumulated
@@ -51,6 +51,11 @@ export async function writeReconciliation(
     const proofsPending = mintUnit.proofsPending
     const unclaimed = mintUnit.unclaimedMintQuotes
     const mintFeesCollected = mintUnit.feeCollected
+
+    // Confirmed in the wallet, owed ecash, not yet in CDK's books. Same
+    // liability as `unclaimed`, one step earlier in its life — without it the
+    // asset is recognised before the debt and the gap reads as drift.
+    const depositsAwaitingCredit = mintUnit.depositsAwaitingCredit ?? 0n
 
     // The mint's own on-chain wallet is a second asset pool it controls
     // directly, so it belongs in reserves alongside the node's balances.
@@ -102,6 +107,7 @@ export async function writeReconciliation(
 
     let deltaOwnCapital: bigint | null = null
     let deltaUnclaimed: bigint | null = null
+    let deltaDepositsAwaitingCredit: bigint | null = null
     let deltaColdStorage: bigint | null = null
     let deltaProvablyUnspendable: bigint | null = null
     let deltaMintFees: bigint | null = null
@@ -112,6 +118,7 @@ export async function writeReconciliation(
         elapsedMs = observation.observedAt.getTime() - prev.observation.observedAt.getTime()
         deltaOwnCapital = ownCapital - prev.ownCapital
         deltaUnclaimed = unclaimed - prev.unclaimed
+        deltaDepositsAwaitingCredit = depositsAwaitingCredit - prev.depositsAwaitingCredit
         deltaColdStorage = coldStorage - prev.coldStorage
         deltaProvablyUnspendable = provablyUnspendable - prev.provablyUnspendable
         deltaMintFees = mintFeesCollected - prev.mintFeesCollected
@@ -126,6 +133,7 @@ export async function writeReconciliation(
         remainingDelta =
             deltaOwnCapital -
             deltaUnclaimed -
+            deltaDepositsAwaitingCredit -
             deltaColdStorage -
             deltaProvablyUnspendable -
             deltaMintFees
@@ -161,11 +169,13 @@ export async function writeReconciliation(
             proofsPending,
             ownCapital,
             unclaimed,
+            depositsAwaitingCredit,
             mintFeesCollected,
             prevObservationId: prev?.observationId ?? null,
             elapsedMs,
             deltaOwnCapital,
             deltaUnclaimed,
+            deltaDepositsAwaitingCredit,
             deltaColdStorage,
             deltaProvablyUnspendable,
             deltaMintFees,

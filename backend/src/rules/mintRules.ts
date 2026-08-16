@@ -390,7 +390,18 @@ export const walletLedgerDivergence: Rule = {
 
         if (rows.length < minSamples) return null
 
-        const gapOf = (r: (typeof rows)[number]) => r.mintOnchain - (r.mintOnchainLedger ?? 0n)
+        // Deposits awaiting credit are subtracted because they are the single
+        // largest EXPLAINED reason the wallet leads the books: a confirmed
+        // deposit is in the wallet immediately and in CDK's ledger only once it
+        // books, which measured up to 55 minutes across 18 real deposits.
+        //
+        // Without this the rule fires on every ordinary on-chain mint — it did,
+        // on 2026-08-16, for a 420,000 sat deposit against a perfectly valid
+        // quote. A user paying on chain and returning hours later to mint is
+        // normal behaviour, not a bookkeeping discrepancy, and a rule that
+        // cannot tell the difference trains the operator to ignore it.
+        const gapOf = (r: (typeof rows)[number]) =>
+            r.mintOnchain - (r.mintOnchainLedger ?? 0n) - r.depositsAwaitingCredit
 
         const first = rows[0]
         const last = rows[rows.length - 1]
@@ -403,21 +414,30 @@ export const walletLedgerDivergence: Rule = {
             (last.observation.observedAt.getTime() - first.observation.observedAt.getTime()) /
             3_600_000
 
-        const direction =
+        // States what moved and lists what can move it. It must NOT name a cause:
+        // the earlier wording inferred one from the sign alone and reported
+        // "value arrived outside any mint quote" for a deposit that had a
+        // perfectly good quote — sending the operator to look for a problem that
+        // did not exist. Attribution belongs to the deposit classifier, which
+        // actually checks; this rule only knows the gap moved.
+        const candidates =
             change < 0n
-                ? 'value left the wallet that CDK never booked'
-                : 'value arrived in the wallet outside any mint quote'
+                ? 'an on-chain fee CDK did not book, a manual withdrawal, or a melt that spent ' +
+                  'without a completed_operations row'
+                : 'a deposit against a quote created before the watchdog began discovery, or ' +
+                  'funds sent to the wallet outside any quote'
 
         return [
             {
                 dedupeKey: unit,
                 title: `Mint on-chain wallet diverging from ledger by ${formatSat(change)} sat over ${windowHours}h`,
                 detail:
-                    `${direction}. Wallet ${formatSat(last.mintOnchain)} sat vs ledger ` +
-                    `${formatSat(last.mintOnchainLedger ?? 0n)} sat — a gap of ` +
-                    `${formatSat(gapOf(last))} sat, which moved ${formatSat(change)} sat across ` +
-                    `${elapsedH.toFixed(1)}h. The level is not the signal; the movement is. ` +
-                    `Threshold ${formatSat(threshold)} sat.`,
+                    `Candidates: ${candidates}. Wallet ${formatSat(last.mintOnchain)} sat vs ledger ` +
+                    `${formatSat(last.mintOnchainLedger ?? 0n)} sat, less ` +
+                    `${formatSat(last.depositsAwaitingCredit)} sat of deposits awaiting credit — ` +
+                    `an unexplained gap of ${formatSat(gapOf(last))} sat, which moved ` +
+                    `${formatSat(change)} sat across ${elapsedH.toFixed(1)}h. The level is not the ` +
+                    `signal; the movement is. Threshold ${formatSat(threshold)} sat.`,
                 context: {
                     unit,
                     samples: rows.length,
@@ -512,6 +532,319 @@ export const walletSync: Rule = {
     },
 }
 
+/**
+ * Windows in which a wallet movement is still "new".
+ *
+ * These are EVENTS: the transaction happened, and there is no ongoing condition
+ * to clear. Emitting a finding only while the movement is fresh lets the alert
+ * engine's own lifecycle do the work — it fires once, then the condition
+ * disappears and it resolves silently.
+ */
+const MOVEMENT_FRESH_MS = 15 * 60_000
+
+/** Reads the wallet movements the mint source attached to this observation. */
+function freshMovements(observation: any): any[] {
+    const raw = (observation.mints ?? []).find((m: any) => m.unit === config.backingUnit)?.raw ?? {}
+    const movements: any[] = raw?.movements ?? []
+    const cutoff = Date.now() - MOVEMENT_FRESH_MS
+    return movements.filter((m) => new Date(m.firstObservedAt).getTime() >= cutoff)
+}
+
+/**
+ * Denominator for "big": the wallet balance BEFORE the movement.
+ *
+ * Relative rather than absolute, as a fixed sat threshold either screams on a
+ * small wallet or goes quiet as the wallet grows. Using the pre-movement balance
+ * is what makes a deposit's percentage mean what a reader expects — the
+ * 420,000 sat deposit of 2026-08-16 was 74% of the 570,355 that preceded it,
+ * not 42% of the 990,355 that followed.
+ */
+function priorBalance(observation: any): bigint | null {
+    const m = (observation.mints ?? []).find((x: any) => x.unit === config.backingUnit)
+    if (!m || m.walletTrustedSpendable === null || m.walletTrustedSpendable === undefined) return null
+
+    const balance = BigInt(m.walletTrustedSpendable)
+    const delta = (freshMovements(observation) as any[]).reduce(
+        (sum, mv) => sum + BigInt(mv.balanceDeltaMsat ?? 0),
+        0n,
+    )
+    const before = balance - delta
+    return before > 0n ? before : balance
+}
+
+function pct(part: bigint, whole: bigint): number {
+    if (whole <= 0n) return 0
+    return Number((part * 10_000n) / whole) / 100
+}
+
+/**
+ * A single on-chain payment large relative to the wallet — a user minting.
+ *
+ * Keyed on the transaction, NOT the quote. CDK permits further payments to a
+ * quote that has already been paid and issued against, and a wallet is not
+ * prevented from doing it, so a quote-keyed alert would swallow every payment
+ * after the first as a duplicate.
+ */
+export const largeOnchainMint: Rule = {
+    id: 'mint_onchain_large_mint',
+    description: 'Large on-chain deposit against a mint quote',
+    defaults: {
+        severity: 'INFO',
+        forEvaluations: 1,
+        clearEvaluations: 1,
+        cooldownSeconds: 86_400,
+        // EVENT: the deposit landed. Nothing clears, so a resolution notice
+        // would double the message count for no information.
+        notifyOnResolve: false,
+        params: { fractionPct: 20 },
+    },
+    async evaluate({ observation, params }) {
+        if (!config.mintRpc.enabled) return null
+
+        const before = priorBalance(observation)
+        if (before === null) return null
+
+        const fraction = numParam(params, 'fractionPct', 20)
+        const findings: RuleFinding[] = []
+
+        for (const m of freshMovements(observation)) {
+            const received = BigInt(m.receivedMsat ?? 0)
+            if (BigInt(m.sentMsat ?? 0) !== 0n || received <= 0n) continue
+            if (m.classification !== 'MINT_QUOTE') continue
+
+            const share = pct(received, before)
+            if (share < fraction) continue
+
+            findings.push({
+                dedupeKey: m.txid,
+                title: `On-chain mint of ${formatSat(received)} sat — ${share.toFixed(1)}% of the wallet`,
+                detail:
+                    `Deposit against mint quote ${m.quoteId ?? 'unknown'}, tx ${String(m.txid).slice(0, 16)}…. ` +
+                    `Wallet held ${formatSat(before)} sat before it. ` +
+                    `Counted as unclaimed until the mint issues the ecash` +
+                    (m.credited ? ' (already booked by the mint).' : ' (not yet booked by the mint).'),
+                context: { txid: m.txid, quoteId: m.quoteId, sharePct: share },
+            })
+        }
+        return findings
+    },
+}
+
+/** The outgoing mirror, for the same liquidity-management reason. */
+export const largeOnchainMelt: Rule = {
+    id: 'mint_onchain_large_melt',
+    description: 'Large on-chain withdrawal from the mint wallet',
+    defaults: {
+        severity: 'INFO',
+        forEvaluations: 1,
+        clearEvaluations: 1,
+        cooldownSeconds: 86_400,
+        notifyOnResolve: false,
+        params: { fractionPct: 20 },
+    },
+    async evaluate({ observation, params }) {
+        if (!config.mintRpc.enabled) return null
+
+        const before = priorBalance(observation)
+        if (before === null) return null
+
+        const fraction = numParam(params, 'fractionPct', 20)
+        const findings: RuleFinding[] = []
+
+        for (const m of freshMovements(observation)) {
+            const delta = BigInt(m.balanceDeltaMsat ?? 0)
+            if (delta >= 0n) continue
+
+            const out = -delta
+            const share = pct(out, before)
+            if (share < fraction) continue
+
+            findings.push({
+                dedupeKey: m.txid,
+                title: `On-chain withdrawal of ${formatSat(out)} sat — ${share.toFixed(1)}% of the wallet`,
+                detail:
+                    `Net outflow in tx ${String(m.txid).slice(0, 16)}…, against a wallet of ` +
+                    `${formatSat(before)} sat. CDK batches several melt quotes into one ` +
+                    `transaction, so this is the movement rather than a single melt. If it does ` +
+                    `not correspond to melts, it is an unbooked withdrawal and reserve drift ` +
+                    `will follow.`,
+                context: { txid: m.txid, sharePct: share },
+            })
+        }
+        return findings
+    },
+}
+
+/**
+ * A confirmed deposit that paid no mint quote address.
+ *
+ * Operator liquidity, most likely — funded from outside the monitored perimeter,
+ * or moved across from the LND wallet. Neither owes anyone ecash, which is why
+ * these are deliberately kept OUT of unclaimed: booking a liability against the
+ * operator's own capital would understate equity permanently.
+ *
+ * Reported rather than corrected. The watchdog cannot tell a deliberate
+ * liquidity move from an unexpected arrival, and only the operator can — so it
+ * says what it saw and leaves the judgement where it belongs.
+ */
+export const unattributedDeposit: Rule = {
+    id: 'mint_onchain_deposit_unattributed',
+    description: 'On-chain deposit with no matching mint quote',
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 1,
+        clearEvaluations: 2,
+        cooldownSeconds: 86_400,
+        notifyOnResolve: false,
+    },
+    async evaluate({ observation }) {
+        if (!config.mintRpc.enabled) return null
+
+        const findings: RuleFinding[] = []
+
+        for (const m of freshMovements(observation)) {
+            if (m.classification !== 'UNATTRIBUTED') continue
+            const received = BigInt(m.receivedMsat ?? 0)
+            if (received <= 0n) continue
+
+            findings.push({
+                dedupeKey: m.txid,
+                title: `Unattributed on-chain deposit of ${formatSat(received)} sat`,
+                detail:
+                    `Tx ${String(m.txid).slice(0, 16)}… paid no address belonging to an on-chain ` +
+                    `mint quote, so the mint owes no ecash for it. Excluded from unclaimed and ` +
+                    `counted as own capital. Expected if you moved liquidity into the wallet; ` +
+                    `worth investigating otherwise.`,
+                context: { txid: m.txid },
+            })
+        }
+        return findings
+    },
+}
+
+/**
+ * A confirmed deposit CDK has not booked long after it should have.
+ *
+ * Threshold in HOURS rather than a sat amount, deliberately. The obvious rule
+ * would be "alert on deposits below the mint's minimum", but that needs the
+ * operator to declare a threshold, and the number they would reach for — the
+ * advertised minimum — is not the one that gates crediting. CDK checks the
+ * individual receive against `[bdk] min_receive_amount_sat`, ignoring what the
+ * quote already holds, so a small top-up to a well-funded quote is refused just
+ * the same. Two numbers that happen to coincide today and need not tomorrow.
+ *
+ * Time needs no configuration and catches the general case: sub-minimum dust,
+ * and equally a deposit stuck for a reason nobody has thought of yet. The
+ * booking lag measured at 0.3–55.1 minutes across 18 real deposits, so six hours
+ * is clear of the distribution by nearly 7×.
+ *
+ * Note this watches the confirmed→booked lag, NOT booked→issued. A user paying
+ * on chain and returning a day later to mint is ordinary and silent — that is
+ * `unclaimed`, and it has always been balanced at both ends.
+ */
+export const depositUncredited: Rule = {
+    id: 'mint_onchain_deposit_uncredited',
+    description: 'Confirmed on-chain deposit the mint has not booked',
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 2,
+        clearEvaluations: 2,
+        cooldownSeconds: 86_400,
+        notifyOnResolve: false,
+        params: { afterHours: 6 },
+    },
+    async evaluate({ observation, params }) {
+        if (!config.mintRpc.enabled) return null
+
+        const raw = (observation.mints ?? []).find((m: any) => m.unit === config.backingUnit)?.raw
+        const uncredited: any[] = (raw as any)?.uncredited ?? []
+        const afterSec = numParam(params, 'afterHours', 6) * 3600
+
+        const findings: RuleFinding[] = []
+
+        for (const d of uncredited) {
+            if (Number(d.uncreditedForSec ?? 0) < afterSec) continue
+
+            const amount = BigInt(d.receivedMsat ?? 0)
+            const hours = (Number(d.uncreditedForSec) / 3600).toFixed(1)
+
+            findings.push({
+                dedupeKey: d.txid,
+                title: `On-chain deposit of ${formatSat(amount)} sat unbooked after ${hours}h`,
+                detail:
+                    `Tx ${String(d.txid).slice(0, 16)}… confirmed in the wallet but the mint has ` +
+                    `written no payment for it. Below the mint's minimum receive amount this is ` +
+                    `permanent and the sats are simply held. ` +
+                    (d.classification === 'MINT_QUOTE'
+                        ? `It paid quote ${String(d.quoteId ?? '').slice(0, 8)}. `
+                        : '') +
+                    `Counted as unclaimed until it ages out, then as own capital.`,
+                context: {
+                    txid: d.txid,
+                    uncreditedForSec: d.uncreditedForSec,
+                    classification: d.classification,
+                },
+            })
+        }
+        return findings
+    },
+}
+
+/**
+ * The mint's wallet spent a deposit it never issued ecash for.
+ *
+ * This is a dusting attack paying off, and it is the only moment worth alerting
+ * on — the dust arriving is harmless, and its value is trivially small. The
+ * damage is done when the wallet CO-SPENDS it: the common-input-ownership
+ * heuristic then attributes every other input address in that transaction to the
+ * mint, and whoever sent the dust gets a map of the wallet for the price of a few
+ * hundred sats.
+ *
+ * Deposit addresses are free to obtain. On-chain mint quotes are unauthenticated,
+ * so anyone can request one and be handed a fresh address without the xpub ever
+ * leaving the mint. Harvesting costs nothing but API calls, which makes the
+ * co-spend the only defensible place to draw a line.
+ *
+ * The watchdog can only report it. Preventing it is coin control in CDK/BDK —
+ * never selecting a sub-minimum UTXO as an input.
+ */
+export const dustCospent: Rule = {
+    id: 'mint_onchain_dust_cospent',
+    description: 'The wallet spent a deposit it never credited — address clustering exposure',
+    defaults: {
+        severity: 'WARNING',
+        forEvaluations: 1,
+        clearEvaluations: 1,
+        cooldownSeconds: 86_400,
+        // EVENT: the transaction is confirmed and the linkage is permanent.
+        // Nothing clears, and nothing can be undone.
+        notifyOnResolve: false,
+    },
+    async evaluate({ observation }) {
+        if (!config.mintRpc.enabled) return null
+
+        const findings: RuleFinding[] = []
+
+        for (const m of freshMovements(observation)) {
+            const dust: string[] = m.cospentDust ?? []
+            if (dust.length === 0) continue
+
+            findings.push({
+                dedupeKey: m.txid,
+                title: `Wallet co-spent ${dust.length} never-credited deposit(s) — clustering exposure`,
+                detail:
+                    `Outgoing tx ${String(m.txid).slice(0, 16)}… drew on ${dust.length} deposit(s) ` +
+                    `the mint never issued ecash for: ${dust.map((t) => t.slice(0, 12)).join(', ')}. ` +
+                    `Whoever sent them can now attribute every other input of that transaction to ` +
+                    `this wallet. The linkage is on chain and permanent. Preventing a repeat means ` +
+                    `coin control in CDK — excluding sub-minimum UTXOs from input selection.`,
+                context: { txid: m.txid, dust },
+            })
+        }
+        return findings
+    },
+}
+
 export const mintRules = [
     mintUnreachable,
     mintOverIssued,
@@ -523,4 +856,9 @@ export const mintRules = [
     walletRpcUnreachable,
     walletLedgerDivergence,
     walletSync,
+    largeOnchainMint,
+    largeOnchainMelt,
+    unattributedDeposit,
+    depositUncredited,
+    dustCospent,
 ]

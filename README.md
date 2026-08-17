@@ -257,38 +257,8 @@ and then ages out of the 48h window by itself.
   block rather than by the payout, which for a large UTXO paying a small melt is a
   several-hundred-thousand-sat phantom deficit.
 
-### Deposit recognition: why `Deposits awaiting credit` exists
 
-A deposit becomes an **asset** when BDK confirms it, but the matching **liability** — the
-ecash the mint now owes — only appears when CDK writes `amount_paid`. Measured on
-2026-08-16, that lag was 15 minutes:
-
-| UTC | Event |
-|---|---|
-| 12:02:44 | on-chain mint quote created, 420,000 sat |
-| 12:07:59 | deposit confirms in BDK — asset recognised |
-| 12:23:00 | CDK books the payment — liability recognised |
-| 12:40:07 | ecash issued |
-
-Any 6h window *starting* inside those 15 minutes holds the deposit in reserves at its
-start and then watches ecash be created against it: assets flat, liabilities +420,000.
-That fired a CRITICAL at 18:09:52 and cleared at 18:29:52 — the gap plus six hours, to the
-second. With deposits over the threshold arriving roughly daily, it would have recurred
-roughly daily.
-
-`Deposits awaiting credit` counts a confirmed deposit as unclaimed from the moment it
-confirms, which closes the identity at every step:
-
-```
-deposit confirms   reserves +X, awaiting +X                → remaining 0
-CDK books it       awaiting −X, unclaimed +X               → remaining 0
-ecash issued       unclaimed −X, ecash issued +X, cap −X   → remaining 0
-```
-
-A genuine unbooked outflow still reads as −X, because nothing on the liability side moves
-with it. That is the point of the wallet basis and it is preserved.
-
-### Deposit attribution: the three categories
+### Onchain deposit attribution: the three categories
 
 Value entering the wallet is one of three things, with completely different accounting:
 
@@ -298,26 +268,12 @@ Value entering the wallet is one of three things, with completely different acco
 | **B** | Operator, from outside the monitored perimeter | none | raises own capital |
 | **C** | Operator, from the monitored LND on-chain wallet | none | nets to zero across the two pools, less fee |
 
-CDK's wallet RPC cannot tell them apart — `WalletTransaction` has no output addresses and
-`WalletAddress` has no txids, so there is no join. `BITCOIN_RPC_URL` supplies it: one
+CDK's wallet RPC cannot tell them apart — `WalletTransaction` has no output addresses so far and
+`WalletAddress` has no txids, so there is no join (until https://github.com/cashubtc/cdk/pull/2367 lands). `BITCOIN_RPC_URL` supplies it: one
 `getrawtransaction` gives the output addresses, which are matched against
 `mint_quote.request` (bare bech32, unique-indexed). A match is **A**; no match is **B/C**,
 which never touches unclaimed.
 
-Two details that are easy to get wrong:
-
-- **Key on the payment, not the quote.** A quote can receive further payments after it has
-  already been paid and issued against. A quote-keyed event would swallow every payment
-  after the first as a duplicate.
-- **`payment_id` is `txid:vout`.** Because the chain lookup tells us *which* output paid
-  the quote address, the credited check is an equality lookup on that unique index rather
-  than a prefix range whose correctness would depend on how the database's collation
-  orders `:` against digits.
-
-Without a chain source the collector falls back to inference: a deposit is assumed to be
-**A** for 24 hours, then released to own capital. Conservative — it counts value as owed
-rather than as equity, so it cannot manufacture a shortfall — and the release is a
-*positive* step, which no drift rule can fire on.
 
 ### An on-chain mint taking hours is normal
 

@@ -18,8 +18,9 @@ Reserves        = LND channel local + LND on-chain + limbo
                   + cold storage (declared) + mint on-chain wallet
 Own capital     = Reserves − Ecash issued + Unspendable ecash (declared)
                   + Proofs pending
-Remaining delta = Δ Own capital − Δ Unclaimed − Δ Cold storage
-                  − Δ Unspendable ecash − Δ Mint fees
+Remaining delta = Δ Own capital − Δ Unclaimed − Δ Deposits awaiting credit
+                  − Δ Dust received − Δ Cold storage − Δ Unspendable ecash
+                  − Δ Mint fees
 ```
 
 **`Own capital` is the mint's equity** — reserves beyond what it owes. It is a *level*, and
@@ -44,7 +45,7 @@ own capital, with the conservative net-of-unclaimed figure shown alongside it. S
 | 3. LND collector | done |
 | 4. Mint collector | done |
 | 5. Reconciliation | done |
-| 6. Rule engine + alert lifecycle | done — 13 rules |
+| 6. Rule engine + alert lifecycle | done — [22 rules](#rules) |
 | 7. Notifiers (ntfy, email) + deadman's switch | done |
 | 8. Dashboard | done |
 | 9. Backfill + threshold calibration | **pending** |
@@ -357,21 +358,44 @@ transaction to the mint, and the sender gets a map of the wallet for a few hundr
 from the chain source. Preventing it is coin control in CDK — excluding sub-minimum UTXOs
 from input selection — not something the watchdog can do.
 
-> **Dust is deliberately NOT special-cased in the accounting.** The obvious change —
-> classify below-minimum deposits as never-creditable and keep them out of the liability
-> side — is asymmetrically dangerous. Get the threshold too high and a deposit CDK *does*
-> credit was excluded, so `unclaimed` jumps with no offset and a false CRITICAL follows.
-> Left alone, dust sits in `Deposits awaiting credit` and ages out, stepping own capital
-> **up**, which no drift rule can fire on. The threshold an operator would reach for is the
-> advertised mint minimum, which is a different setting from the one that actually gates
-> crediting; they coincide today and need not tomorrow.
+Dust is therefore **booked straight to own capital**, via
+`MINT_ONCHAIN_MIN_RECEIVE_SAT`. It can never become ecash, so the mint owes nobody for it,
+and parking it in unclaimed would mean waiting for an event that cannot occur.
 
-`mint_onchain_deposit_uncredited` therefore keys on **time, not amount** — a confirmed
-deposit unbooked after 6h, against a measured booking lag of 0.3–55.1 minutes. No threshold
-to configure, and it catches a deposit stuck for a reason nobody has anticipated as readily
-as it catches dust.
+> The obvious objection is that a mis-set threshold would exclude a deposit CDK *does*
+> credit, so `unclaimed` would jump with no offset and a false CRITICAL would follow. That
+> is answered by making `dustReceived` a **live set** rather than a cumulative one: if CDK
+> credits a deposit classified as dust, it leaves the set at the same moment it enters
+> `unclaimed`, and the two movements cancel in `remaining delta`. Setting the threshold too
+> high costs nothing but a mislabelled line on the dashboard.
+>
+> Use the mint's `[bdk] min_receive_amount_sat`, not its advertised minimum — they coincide
+> on this mint and need not on another.
 
-`mint_wallet_ledger_divergence` subtracts `Deposits awaiting credit` for the same reason.
+Each dust deposit raises `mint_onchain_dust_deposit` **once, on arrival**. It is an event,
+fired off the freshness window rather than off a standing condition — because a dust
+deposit is unbooked *forever*, so a condition-based rule never clears and re-notifies
+daily, per transaction, indefinitely. A 400 sat deposit reporting itself at 98 hours and
+counting is noise; one notification per arrival is what makes the frequency legible.
+
+Nothing watches the confirmed→booked lag on ordinary deposits. Above the minimum, a deposit
+taking hours is normal operation: quotes never expire, and a user who pays on chain and
+returns the next day to mint is expected behaviour. Those are reported only when they clear
+the large-movement test.
+
+**Above-minimum deposits are never released on a timer.** Aging one out would be the
+watchdog deciding by timeout that the mint no longer owes it. The moment that legitimately
+becomes true is a keyset phase-out — mint policy under the ToS — declared through
+`PROVABLY_UNSPENDABLE_ECASH`. That is only bounded because dust is separated by amount
+instead; the deposits that would otherwise accumulate forever are exactly the uncreditable
+ones.
+
+`mint_wallet_ledger_divergence` subtracts **both** `Deposits awaiting credit` and
+`Dust received`. Dust is not a rounding detail there: at 2,503 sat it accounted for the
+*entire* observed baseline gap between the wallet and the ledger on this mint — the wallet
+holds sub-minimum deposits CDK never booked, so the ledger cannot see them. With both
+explained components removed the gap starts at zero, which is what makes its movement
+meaningful rather than noise around an arbitrary historical offset.
 The wallet legitimately leads the books for the whole of lag 1, and a rule that cannot tell
 that from a discrepancy fires on every ordinary mint — it did, on 2026-08-16, against a
 perfectly valid quote.
@@ -419,6 +443,85 @@ evaluated while it holds.
 > **Any change to what `Reserves` includes creates a step that reads as unexplained drift.**
 > Either backfill history (`backend/scripts/backfill-onchain.mjs`) or record the change as
 > a declared term — never let it land silently in `Remaining delta`.
+
+## Rules
+
+22 rules, all tunable at runtime without a redeploy — see [Editing rule
+configuration](#editing-rule-configuration). Logic lives in
+`backend/src/rules/`; only the thresholds live in the database.
+
+**`for`** is how many consecutive evaluations the condition must hold before firing (one
+evaluation per collection tick, 5 minutes by default). **Kind** is `state` when the
+condition is ongoing and its clearing is worth a notification, or `event` when something
+merely happened and there is nothing to clear — a resolution notice there is pure noise and
+doubles the message count.
+
+### LND
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `lnd_unreachable` | CRITICAL | 2 | state | LND did not respond to the collector |
+| `lnd_not_synced` | WARNING | 3 | state | Not synced to chain or graph |
+| `lnd_force_close` | WARNING | 1 | state | Channels force-closing, or funds in limbo |
+| `lnd_inactive_channels` | WARNING | 3 | state | More than `maxInactive` (3) channels inactive |
+
+### Mint — database and ledger
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `mint_unreachable` | CRITICAL | 2 | state | The mint database read failed. Names the actual failure — permission, timeout, unreachable — rather than reporting all three as one |
+| `mint_over_issued` | CRITICAL | 1 | state | `amount_issued > amount_paid`: ecash created against an unpaid quote. A hard invariant; must always be zero |
+| `mint_schema_access` | WARNING | 1 | state | A required table is unreadable, or an unrecognised one appeared — a CDK migration may have relocated accounting |
+| `mint_keyset_change` | INFO | 1 | event | Keyset count changed. Verify it was an intentional rotation |
+| `mint_proofs_pending_high` | WARNING | 3 | state | Proofs locked in `PENDING` above `thresholdSat` (500,000). **Uncalibrated** — deliberately above baseline, so currently insensitive rather than noisy |
+| `mint_melt_requests_stuck` | WARNING | 3 | state | More than `maxRows` (25) rows in the transient `melt_request` table |
+| `mint_onchain_melt_stuck` | WARNING | 2 | state | A committed on-chain melt is unsettled past 24h, so it is no longer subtracted. Degrades the ledger **cross-check**, not reserves — the measured wallet already reflects the spend |
+
+### Mint — BDK wallet
+
+Only evaluated when `MINT_RPC_HOST` is set; they return "not evaluable" otherwise rather
+than a false all-clear.
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `mint_wallet_rpc_unreachable` | CRITICAL | 3 | state | The wallet balance could not be read. CRITICAL because no reconciliation row is written while it holds, so **reserve drift is not being evaluated** — the watchdog is alive and reporting healthily while blind on one side |
+| `mint_wallet_ledger_divergence` | WARNING | 3 | state | The wallet-versus-ledger gap **moved** more than `thresholdSat` (50,000) over `windowHours` (24). The level is never the signal; deposits awaiting credit and dust are both subtracted, so the gap starts at zero |
+| `mint_wallet_sync` | WARNING / CRITICAL | 3 | state | The wallet is more than `maxBlocksBehind` (6) behind LND's height, or on a network other than `expectedNetwork` (CRITICAL). A stalled BDK sync reports a stale balance with complete confidence; LND's height is an independent read of the same chain |
+
+### Mint — on-chain movements
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `mint_onchain_large_mint` | INFO | 1 | event | A deposit against a mint quote exceeds `fractionPct` (20) of the **pre-movement** wallet balance. Keyed on the payment, not the quote — a quote can receive further payments after it has been paid and issued against |
+| `mint_onchain_large_melt` | INFO | 1 | event | A net outflow exceeds `fractionPct` (20) of the pre-movement balance. Keyed on the transaction, which is the right granularity since CDK batches several melt quotes into one |
+| `mint_onchain_deposit_unattributed` | WARNING | 1 | event | A confirmed deposit paid no mint quote address. Operator liquidity, or something unexpected — either way the mint owes no ecash, so it is excluded from unclaimed |
+| `mint_onchain_dust_deposit` | WARNING | 1 | event | A confirmed deposit below `MINT_ONCHAIN_MIN_RECEIVE_SAT`, which CDK can never credit. Fires **once on arrival**, not on a standing condition — dust is unbooked forever, so a condition-based rule would never clear |
+| `mint_onchain_dust_cospent` | WARNING | 1 | event | The wallet spent a deposit it never credited. This is a dusting attack **paying off**: common-input-ownership now links every co-input address to the mint, permanently. Needs `BITCOIN_RPC_URL` for transaction inputs |
+
+### Reconciliation
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `reserve_drift_short` | CRITICAL | 2 | state | `Remaining delta` falls below −20,000 sat/h over 6h |
+| `reserve_drift_long` | WARNING | 3 | state | `Remaining delta` falls below −2,000 sat/h over 48h |
+
+Both are rates from the window **endpoints**, not sums of per-tick deltas, so a gap in the
+series cannot accumulate error. Value hysteresis: the bar to clear is higher than the bar to
+fire, so a rate hovering at the threshold does not produce an endless fire/resolve stream.
+`expectedDriftSatPerHour` exists because the baseline is **not zero** — the mint is
+legitimately over-capitalised over time by routing income and by rounding Lightning fees up
+to whole sats.
+
+### Collector
+
+| Rule | Severity | for | Kind | Fires when |
+|---|---|---|---|---|
+| `collector_observation_gap` | WARNING | 1 | event | The interval between observations exceeded `toleranceMultiple` (3) × the collection interval |
+
+> This rule is **not** a deadman's switch and cannot be one: it needs a later observation to
+> notice the gap, so a watchdog that stopped entirely never fires it. See
+> [Deadman's switch](#deadmans-switch-via-log-analysis) — the absence rule is the one that
+> matters.
 
 ## Deadman's switch via log analysis
 

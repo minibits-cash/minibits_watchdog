@@ -78,6 +78,9 @@ export interface MintSnapshot {
   /** Confirmed deposits matching no mint quote — operator liquidity. NOT a liability. */
   depositsUnattributed: Msat | null
   depositsUnattributedCount: number | null
+  /** Below the mint's minimum receive amount — never creditable, so own capital. */
+  depositsDust: Msat | null
+  depositsDustCount: number | null
   unclaimedMintQuotes: Msat
   /**
    * On-chain share of unclaimedMintQuotes. Already inside it — a breakdown, not a
@@ -111,10 +114,13 @@ export interface Reconciliation {
   unclaimed: Msat
   /** Confirmed on-chain deposits the mint owes ecash for but has not booked. */
   depositsAwaitingCredit: Msat
+  /** Sub-minimum deposits CDK will never credit. Own capital, not a liability. */
+  dustReceived: Msat
   mintFeesCollected: Msat
   deltaOwnCapital: Msat | null
   deltaUnclaimed: Msat | null
   deltaDepositsAwaitingCredit: Msat | null
+  deltaDustReceived: Msat | null
   deltaColdStorage: Msat | null
   deltaProvablyUnspendable: Msat | null
   deltaMintFees: Msat | null
@@ -178,6 +184,8 @@ export interface DeltaResponse {
     unclaimed: Msat
     /** Same liability as `unclaimed`, before the mint booked it. */
     depositsAwaitingCredit: Msat
+    /** Sub-minimum deposits. Explained, like the term above. */
+    dustReceived: Msat
     coldStorage: Msat
     mintFees: Msat
     remaining: Msat

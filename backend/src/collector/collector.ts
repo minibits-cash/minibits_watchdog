@@ -213,6 +213,8 @@ function toMintSnapshot(u: MintReading['units'][number]) {
         depositsAwaitingCreditCount: u.depositsAwaitingCreditCount,
         depositsUnattributed: u.depositsUnattributed,
         depositsUnattributedCount: u.depositsUnattributedCount,
+        depositsDust: u.depositsDust,
+        depositsDustCount: u.depositsDustCount,
         keysetsActive: u.keysetsActive,
         keysetsTotal: u.keysetsTotal,
         keysetBreakdown: JSON.parse(

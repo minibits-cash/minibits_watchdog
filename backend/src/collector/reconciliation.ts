@@ -11,7 +11,8 @@ import { MintReading } from '../sources/mint/mintSource'
  *                     + Mint on-chain (BDK)
  *   Own capital     = Reserves − Ecash issued + Unspendable ecash + Proofs pending
  *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Deposits awaiting credit
- *                     − Δ Cold storage − Δ Unspendable ecash − Δ Mint fees
+ *                     − Δ Dust received − Δ Cold storage − Δ Unspendable ecash
+ *                     − Δ Mint fees
  *
  * `Own capital` is the mint's equity: reserves in excess of what it owes. It is
  * a level and carries no signal on its own, being accumulated
@@ -56,6 +57,11 @@ export async function writeReconciliation(
     // liability as `unclaimed`, one step earlier in its life — without it the
     // asset is recognised before the debt and the gap reads as drift.
     const depositsAwaitingCredit = mintUnit.depositsAwaitingCredit ?? 0n
+
+    // Below the mint's minimum receive amount, so never creditable. Own capital
+    // on sight, and subtracted here as explained so its arrival does not read as
+    // an unexplained gain.
+    const dustReceived = mintUnit.depositsDust ?? 0n
 
     // The mint's own on-chain wallet is a second asset pool it controls
     // directly, so it belongs in reserves alongside the node's balances.
@@ -108,6 +114,7 @@ export async function writeReconciliation(
     let deltaOwnCapital: bigint | null = null
     let deltaUnclaimed: bigint | null = null
     let deltaDepositsAwaitingCredit: bigint | null = null
+    let deltaDustReceived: bigint | null = null
     let deltaColdStorage: bigint | null = null
     let deltaProvablyUnspendable: bigint | null = null
     let deltaMintFees: bigint | null = null
@@ -119,6 +126,7 @@ export async function writeReconciliation(
         deltaOwnCapital = ownCapital - prev.ownCapital
         deltaUnclaimed = unclaimed - prev.unclaimed
         deltaDepositsAwaitingCredit = depositsAwaitingCredit - prev.depositsAwaitingCredit
+        deltaDustReceived = dustReceived - prev.dustReceived
         deltaColdStorage = coldStorage - prev.coldStorage
         deltaProvablyUnspendable = provablyUnspendable - prev.provablyUnspendable
         deltaMintFees = mintFeesCollected - prev.mintFeesCollected
@@ -134,6 +142,7 @@ export async function writeReconciliation(
             deltaOwnCapital -
             deltaUnclaimed -
             deltaDepositsAwaitingCredit -
+            deltaDustReceived -
             deltaColdStorage -
             deltaProvablyUnspendable -
             deltaMintFees
@@ -170,12 +179,14 @@ export async function writeReconciliation(
             ownCapital,
             unclaimed,
             depositsAwaitingCredit,
+            dustReceived,
             mintFeesCollected,
             prevObservationId: prev?.observationId ?? null,
             elapsedMs,
             deltaOwnCapital,
             deltaUnclaimed,
             deltaDepositsAwaitingCredit,
+            deltaDustReceived,
             deltaColdStorage,
             deltaProvablyUnspendable,
             deltaMintFees,

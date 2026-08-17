@@ -9,7 +9,8 @@ import { config } from '../config'
  * missed sample:
  *
  *   Remaining delta = Δ Own capital − Δ Unclaimed − Δ Deposits awaiting credit
- *                     − Δ Cold storage − Δ Unspendable ecash − Δ Mint fees
+ *                     − Δ Dust received − Δ Cold storage − Δ Unspendable ecash
+ *                     − Δ Mint fees
  *   rate            = Remaining delta / elapsed hours
  *
  * Computed from the window endpoints, not by summing per-tick deltas, so gaps in
@@ -66,6 +67,7 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
             // bug that let editing COLD_STORAGE_RESERVES fire a drift alert.
             const deltaAwaitingCredit =
                 last.depositsAwaitingCredit - first.depositsAwaitingCredit
+            const deltaDust = last.dustReceived - first.dustReceived
 
             // The operator-declared terms are subtracted here for the same reason
             // the stored column and /deltas subtract them: revising a declaration
@@ -83,6 +85,7 @@ function makeReserveDriftRule(id: string, description: string, defaults: RuleDef
                 deltaOwnCapital -
                 deltaUnclaimed -
                 deltaAwaitingCredit -
+                deltaDust -
                 deltaColdStorage -
                 deltaUnspendable -
                 deltaMintFees

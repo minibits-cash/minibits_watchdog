@@ -190,10 +190,21 @@ export function ReconciliationPanel({
         ) : null}
 
         {/*
-          Deliberately NOT an encumbrance: no mint quote claimed these, so the
-          mint owes ecash to nobody for them. They are operator liquidity and
-          belong to own capital, which is why this line is informational.
+          Deliberately NOT encumbrances: nothing claims these, so the mint owes
+          ecash to nobody for them. They belong to own capital, which is why these
+          lines are informational rather than deductions.
+
+          Dust is separated from operator liquidity because the two differ in
+          intent, not in accounting — sub-minimum deposits are uncreditable by
+          CDK's own rule, and arrive from strangers rather than from the operator.
         */}
+        {mint?.depositsDust && BigInt(mint.depositsDust) > 0n ? (
+          <OfWhich
+            label="of which dust (uncreditable)"
+            value={mint.depositsDust}
+            note={`${mint.depositsDustCount} deposit(s) below the mint minimum · never creditable, counted as equity`}
+          />
+        ) : null}
         {mint?.depositsUnattributed && BigInt(mint.depositsUnattributed) > 0n ? (
           <OfWhich
             label="of which unattributed deposits"

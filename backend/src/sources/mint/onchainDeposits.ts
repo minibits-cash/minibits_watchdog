@@ -48,27 +48,20 @@ import { txDetails } from '../chain/bitcoinRpcClient'
 const MAX_CLASSIFY_ATTEMPTS = 12
 
 /**
- * How long an unclassifiable deposit is still assumed to be a mint payment.
+ * An uncredited deposit is NEVER released to own capital on a timer.
  *
- * Only reached when there is NO chain source — with bitcoind configured, a
- * deposit is classified from its own output addresses on the first tick after it
- * confirms and this bound is never consulted.
+ * An earlier version did, on the grounds that operator liquidity should not sit
+ * in the mint's liabilities forever. That was wrong: a deposit above the mint's
+ * minimum can be minted at any later time — the quote never expires — so
+ * reclassifying it unilaterally would decide, on the watchdog's own authority,
+ * that the mint no longer owes it. The moment that legitimately happens is a
+ * keyset phase-out, which is a mint policy event covered by the ToS and declared
+ * through PROVABLY_UNSPENDABLE_ECASH, not something a timeout should infer.
  *
- * Without one, the fallback is to assume the deposit is a mint payment, because
- * that is the conservative direction: it counts value as owed rather than as
- * equity, and understating own capital cannot produce a false shortfall alert.
- * The bound exists only so operator liquidity does not sit in the mint's
- * liabilities indefinitely, and crossing it steps own capital UP, which no drift
- * rule can fire on.
- *
- * 24 hours, not the 1 hour first written here. Measured across 18 real deposits,
- * the confirmed→booked lag ran to 55.1 minutes — a one-hour bound would have
- * released a deposit minutes before CDK booked it, and the release plus the
- * booking would then have landed in the same window as −X: precisely the false
- * CRITICAL this whole term exists to prevent. The bound has to sit well clear of
- * the real distribution, not just past its median.
+ * Dust is different, and it is separated by AMOUNT rather than by age: below the
+ * mint's minimum receive amount the deposit is not merely unclaimed, it is
+ * uncreditable, so there is nothing to wait for.
  */
-const INFERENCE_BOUND_SEC = 24 * 3600
 
 /** Beyond this, a transaction is history: classified, booked, and never revisited. */
 const ACTIVE_WINDOW_SEC = 7 * 86_400
@@ -142,6 +135,12 @@ export interface OnchainDepositReading {
     /** Confirmed deposits with no matching mint quote — operator liquidity. msat. */
     unattributed: bigint
     unattributedCount: number
+    /**
+     * Confirmed deposits below the mint's minimum receive amount, which CDK will
+     * never credit. Own capital, not a liability. msat.
+     */
+    dust: bigint
+    dustCount: number
     /** Still unclassified: no chain source, or lookups failing. */
     unclassified: bigint
     unclassifiedCount: number
@@ -165,6 +164,8 @@ const EMPTY: OnchainDepositReading = {
     awaitingCreditCount: 0,
     unattributed: 0n,
     unattributedCount: 0,
+    dust: 0n,
+    dustCount: 0,
     unclassified: 0n,
     unclassifiedCount: 0,
     movements: [],
@@ -192,6 +193,11 @@ export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
         // the honest reading, not "no deposits are awaiting credit".
         error = String(e?.message ?? e)
     }
+
+    // Dust first, and deliberately before the chain lookups: it is decided by
+    // amount alone, so it needs no chain source at all and it saves a lookup on
+    // every deposit that turns out to be uncreditable anyway.
+    await classifyDust()
 
     // Both work from the cache and the mint database, so they still make
     // progress when the wallet RPC is the thing that is down.
@@ -222,6 +228,41 @@ async function cacheTransactions(txs: MintWalletTx[]): Promise<void> {
 }
 
 /**
+ * Mark confirmed deposits that fall below the mint's minimum receive amount.
+ *
+ * Needs no chain source — the amount is already in the wallet's own transaction
+ * list — so this works on every deployment.
+ *
+ * Uses the total the wallet received in the transaction, which is CONSERVATIVE
+ * rather than exact. CDK tests each receive individually, so a transaction paying
+ * two 6,000 sat outputs to two quote addresses would be refused on both while
+ * summing to 12,000 here and staying out of the dust set. Erring that way keeps
+ * the deposit in unclaimed, which is the safe direction: it treats value as owed
+ * rather than as equity.
+ */
+async function classifyDust(): Promise<void> {
+    const threshold = BigInt(config.mintOnchainMinReceiveSat) * 1000n
+    if (threshold <= 0n) return
+
+    const { count } = await prisma.mintWalletTx.updateMany({
+        where: {
+            classification: 'PENDING',
+            sentSat: 0n,
+            confirmationHeight: { not: null },
+            receivedSat: { gt: 0n, lt: threshold },
+        },
+        data: { classification: 'DUST', classifiedAt: new Date() },
+    })
+
+    if (count > 0) {
+        log.info('[onchainDeposits] classified deposits as dust', {
+            count,
+            thresholdSat: config.mintOnchainMinReceiveSat,
+        })
+    }
+}
+
+/**
  * Resolve PENDING transactions to MINT_QUOTE or UNATTRIBUTED using the chain.
  *
  * Only inbound transactions are classified. An outbound one is the mint spending
@@ -238,7 +279,14 @@ async function classifyPending(): Promise<void> {
             classification: 'PENDING',
             confirmationHeight: { not: null },
             classifyAttempts: { lt: MAX_CLASSIFY_ATTEMPTS },
-            firstObservedAt: { gte: since },
+            // Uncredited deposits are exempt from the window, matching the
+            // exemption in summarise(). Without it the two disagreed: a deposit
+            // older than ACTIVE_WINDOW_SEC still counted as a liability but could
+            // never be classified out of that state again. A chain source
+            // unreachable for a week would have left every deposit from that week
+            // permanently PENDING, and therefore permanently owed, even after
+            // bitcoind came back.
+            OR: [{ firstObservedAt: { gte: since } }, { sentSat: 0n, creditedAt: null }],
         },
         orderBy: { firstObservedAt: 'asc' },
     })
@@ -383,19 +431,23 @@ async function summarise(): Promise<OnchainDepositReading> {
     const since = new Date(Date.now() - ACTIVE_WINDOW_SEC * 1000)
 
     const rows = await prisma.mintWalletTx.findMany({
-        // Aged out at ACTIVE_WINDOW_SEC even when still uncredited, which is
-        // safe because booking is chain-driven: measured across 18 deposits it
-        // never exceeded 55 minutes, so seven days clears the distribution by
-        // roughly 180×.
+        // An uncredited deposit is exempt from the window and never ages out.
         //
-        // The alternative — exempting uncredited deposits forever, since on-chain
-        // quotes never expire — accumulates without bound. Deposits below the
-        // mint's `min_receive_amount_sat` are accepted by the wallet and never
-        // booked by CDK: four of them, 2,503 sat, are sitting in this wallet
-        // today and account for the entire baseline gap against the ledger. Held
-        // forever they would be a permanently growing phantom liability; aged
-        // out they step own capital UP once, which no drift rule can fire on.
-        where: { firstObservedAt: { gte: since } },
+        // Aging it out would release it into own capital on a timer — the
+        // watchdog deciding by timeout that the mint no longer owes it. On-chain
+        // quotes never expire, so an above-minimum deposit can be minted at any
+        // later time and remains a liability until it is. The moment that
+        // legitimately stops being true is a keyset phase-out, which is mint
+        // policy under the ToS and gets declared through
+        // PROVABLY_UNSPENDABLE_ECASH.
+        //
+        // This is only bounded because DUST is separated by AMOUNT instead. The
+        // deposits that would otherwise accumulate here forever are the ones
+        // below `min_receive_amount_sat`, and those are uncreditable rather than
+        // merely unclaimed — classifyDust() moves them to own capital on sight.
+        where: {
+            OR: [{ firstObservedAt: { gte: since } }, { sentSat: 0n, creditedAt: null }],
+        },
         orderBy: { firstObservedAt: 'desc' },
     })
 
@@ -403,6 +455,8 @@ async function summarise(): Promise<OnchainDepositReading> {
     let awaitingCreditCount = 0
     let unattributed = 0n
     let unattributedCount = 0
+    let dust = 0n
+    let dustCount = 0
     let unclassified = 0n
     let unclassifiedCount = 0
 
@@ -491,13 +545,28 @@ async function summarise(): Promise<OnchainDepositReading> {
             continue
         }
 
-        // PENDING. Assumed owed while inside the bound, then released.
+        // Below the mint's minimum receive amount, so CDK will never credit it.
+        // Not a liability at all — the mint owes ecash to nobody for it — and
+        // therefore own capital from the moment it confirms rather than something
+        // held in unclaimed waiting for an event that cannot occur.
+        //
+        // Reported through `dust` so remainingDelta can subtract it as explained.
+        // That also makes a wrong MINT_ONCHAIN_MIN_RECEIVE_SAT self-correcting:
+        // this is a LIVE set, so a deposit CDK does credit leaves it (creditedAt
+        // is set, and the `continue` above takes it out) at the same moment it
+        // enters `unclaimed`, and the two cancel.
+        if (r.classification === 'DUST') {
+            dust += r.receivedSat
+            dustCount++
+            continue
+        }
+
+        // PENDING — not classifiable yet. Held as owed indefinitely rather than
+        // released on a timer, for the reason given on the query above.
         unclassified += r.receivedSat
         unclassifiedCount++
-        if (ageSec(r) <= INFERENCE_BOUND_SEC) {
-            awaitingCredit += r.receivedSat
-            awaitingCreditCount++
-        }
+        awaitingCredit += r.receivedSat
+        awaitingCreditCount++
     }
 
     return {
@@ -505,6 +574,8 @@ async function summarise(): Promise<OnchainDepositReading> {
         awaitingCreditCount,
         unattributed,
         unattributedCount,
+        dust,
+        dustCount,
         unclassified,
         unclassifiedCount,
         movements,

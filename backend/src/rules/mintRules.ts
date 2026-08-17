@@ -219,19 +219,27 @@ export const meltRequestsStuck: Rule = {
 }
 
 /**
- * An on-chain melt still committed past the window in which the watchdog trusts
- * it as a wallet-balance correction.
+ * An on-chain melt still committed past INFLIGHT_MELT_MAX_AGE_SEC.
  *
- * This is the alert half of a deliberate trade. Inside the window a committed
- * melt is subtracted from on-chain reserves, because its transaction has left
- * the BDK wallet. Past it, the transaction may instead have been dropped — which
- * returns the funds — so the collector stops subtracting and reports it here.
- * Either way the on-chain reserve figure is no longer trustworthy while this
- * fires, which is precisely when a human should look rather than a heuristic
- * guess.
+ * This is the alert half of a deliberate trade, and the LAST remaining place
+ * where an age threshold changes an accounting figure. Inside the window a
+ * committed melt is subtracted from the ledger estimate, because its transaction
+ * has left the BDK wallet. Past it the transaction may instead have been dropped,
+ * which returns the funds, so the collector stops subtracting and reports it here.
+ *
+ * ⚠ Its reach shrank when the WALLET basis arrived, and the distinction matters.
+ * It now affects only `mintOnchainLedger` — the cross-check — because reserves
+ * come from the measured wallet, which already reflects a broadcast spend exactly
+ * as LND's local_balance does. So a stuck melt no longer makes the RESERVE figure
+ * untrustworthy; it makes the LEDGER COMPARISON untrustworthy.
+ *
+ * The residue is that ageing a melt out of `inflight` steps the ledger estimate
+ * up by that amount, which moves the wallet-versus-ledger gap and can therefore
+ * nudge `mint_wallet_ledger_divergence`. That is a cross-check artifact, not a
+ * solvency one, and this rule fires alongside it to say why.
  *
  * State-style, so it resolves: unlike a collection gap, "the melt is no longer
- * stuck" is information — it says the reserve figure can be trusted again.
+ * stuck" is information — it says the comparison can be trusted again.
  */
 export const onchainMeltStuck: Rule = {
     id: 'mint_onchain_melt_stuck',
@@ -260,9 +268,11 @@ export const onchainMeltStuck: Rule = {
                 title: `${m.onchainInflightStaleCount} on-chain melt(s) unsettled for over ${hours}h`,
                 detail:
                     `${formatSat(BigInt(m.onchainInflightStale ?? 0))} sat committed and no longer ` +
-                    `subtracted from on-chain reserves, so that figure may be overstated by up to ` +
-                    `that amount. Check whether the transaction confirmed, was dropped, or is still ` +
-                    `in the mempool.`,
+                    `subtracted from the CDK ledger estimate, which may therefore overstate by up ` +
+                    `to that amount. Reserves are unaffected — they come from the measured wallet, ` +
+                    `which already reflects the broadcast spend — so this degrades the ` +
+                    `wallet-versus-ledger cross-check rather than the solvency figure. Check ` +
+                    `whether the transaction confirmed, was dropped, or is still in the mempool.`,
                 context: {
                     unit: m.unit,
                     staleCount: m.onchainInflightStaleCount,
@@ -400,8 +410,16 @@ export const walletLedgerDivergence: Rule = {
         // quote. A user paying on chain and returning hours later to mint is
         // normal behaviour, not a bookkeeping discrepancy, and a rule that
         // cannot tell the difference trains the operator to ignore it.
+        //
+        // Dust is subtracted for the same reason and is not a rounding detail: it
+        // accounts for the ENTIRE observed baseline gap on this mint. The wallet
+        // holds 2,503 sat of sub-minimum deposits that CDK never booked, so the
+        // ledger cannot see them and the wallet leads it by exactly that. Removing
+        // both explained components leaves a gap that starts at zero, which is what
+        // makes its movement meaningful rather than noise around an arbitrary
+        // historical offset.
         const gapOf = (r: (typeof rows)[number]) =>
-            r.mintOnchain - (r.mintOnchainLedger ?? 0n) - r.depositsAwaitingCredit
+            r.mintOnchain - (r.mintOnchainLedger ?? 0n) - r.depositsAwaitingCredit - r.dustReceived
 
         const first = rows[0]
         const last = rows[rows.length - 1]
@@ -434,7 +452,8 @@ export const walletLedgerDivergence: Rule = {
                 detail:
                     `Candidates: ${candidates}. Wallet ${formatSat(last.mintOnchain)} sat vs ledger ` +
                     `${formatSat(last.mintOnchainLedger ?? 0n)} sat, less ` +
-                    `${formatSat(last.depositsAwaitingCredit)} sat of deposits awaiting credit — ` +
+                    `${formatSat(last.depositsAwaitingCredit)} sat awaiting credit and ` +
+                    `${formatSat(last.dustReceived)} sat of dust — ` +
                     `an unexplained gap of ${formatSat(gapOf(last))} sat, which moved ` +
                     `${formatSat(change)} sat across ${elapsedH.toFixed(1)}h. The level is not the ` +
                     `signal; the movement is. Threshold ${formatSat(threshold)} sat.`,
@@ -723,67 +742,54 @@ export const unattributedDeposit: Rule = {
 }
 
 /**
- * A confirmed deposit CDK has not booked long after it should have.
+ * A dust deposit, announced ONCE when it first appears.
  *
- * Threshold in HOURS rather than a sat amount, deliberately. The obvious rule
- * would be "alert on deposits below the mint's minimum", but that needs the
- * operator to declare a threshold, and the number they would reach for — the
- * advertised minimum — is not the one that gates crediting. CDK checks the
- * individual receive against `[bdk] min_receive_amount_sat`, ignoring what the
- * quote already holds, so a small top-up to a well-funded quote is refused just
- * the same. Two numbers that happen to coincide today and need not tomorrow.
+ * Fires off the freshness window rather than off a standing condition, which is
+ * the difference between an event and a nag. The rule this replaced tested "still
+ * unbooked after 6h", and since a dust deposit is unbooked *forever* that
+ * condition never cleared: it re-notified daily, per transaction, for as long as
+ * the sats sat in the wallet — a 400 sat deposit reporting itself at 98 hours and
+ * counting. What the operator actually needs is one notification per arrival, to
+ * see how often it is happening.
  *
- * Time needs no configuration and catches the general case: sub-minimum dust,
- * and equally a deposit stuck for a reason nobody has thought of yet. The
- * booking lag measured at 0.3–55.1 minutes across 18 real deposits, so six hours
- * is clear of the distribution by nearly 7×.
- *
- * Note this watches the confirmed→booked lag, NOT booked→issued. A user paying
- * on chain and returning a day later to mint is ordinary and silent — that is
- * `unclaimed`, and it has always been balanced at both ends.
+ * Nothing here watches the confirmed→booked lag on ordinary deposits any more.
+ * Above the minimum, a deposit taking hours is normal operation: quotes never
+ * expire, and a user who pays on chain and returns the next day to mint is
+ * ordinary behaviour, not an anomaly. Those are reported only when they clear the
+ * large-movement test.
  */
-export const depositUncredited: Rule = {
-    id: 'mint_onchain_deposit_uncredited',
-    description: 'Confirmed on-chain deposit the mint has not booked',
+export const dustDeposit: Rule = {
+    id: 'mint_onchain_dust_deposit',
+    description: 'On-chain deposit below the mint minimum, which can never be credited',
     defaults: {
         severity: 'WARNING',
-        forEvaluations: 2,
-        clearEvaluations: 2,
+        forEvaluations: 1,
+        clearEvaluations: 1,
         cooldownSeconds: 86_400,
         notifyOnResolve: false,
-        params: { afterHours: 6 },
     },
-    async evaluate({ observation, params }) {
+    async evaluate({ observation }) {
         if (!config.mintRpc.enabled) return null
-
-        const raw = (observation.mints ?? []).find((m: any) => m.unit === config.backingUnit)?.raw
-        const uncredited: any[] = (raw as any)?.uncredited ?? []
-        const afterSec = numParam(params, 'afterHours', 6) * 3600
 
         const findings: RuleFinding[] = []
 
-        for (const d of uncredited) {
-            if (Number(d.uncreditedForSec ?? 0) < afterSec) continue
+        for (const m of freshMovements(observation)) {
+            if (m.classification !== 'DUST') continue
 
-            const amount = BigInt(d.receivedMsat ?? 0)
-            const hours = (Number(d.uncreditedForSec) / 3600).toFixed(1)
+            const amount = BigInt(m.receivedMsat ?? 0)
 
             findings.push({
-                dedupeKey: d.txid,
-                title: `On-chain deposit of ${formatSat(amount)} sat unbooked after ${hours}h`,
+                dedupeKey: m.txid,
+                title: `Dust deposit of ${formatSat(amount)} sat — below the mint minimum`,
                 detail:
-                    `Tx ${String(d.txid).slice(0, 16)}… confirmed in the wallet but the mint has ` +
-                    `written no payment for it. Below the mint's minimum receive amount this is ` +
-                    `permanent and the sats are simply held. ` +
-                    (d.classification === 'MINT_QUOTE'
-                        ? `It paid quote ${String(d.quoteId ?? '').slice(0, 8)}. `
-                        : '') +
-                    `Counted as unclaimed until it ages out, then as own capital.`,
-                context: {
-                    txid: d.txid,
-                    uncreditedForSec: d.uncreditedForSec,
-                    classification: d.classification,
-                },
+                    `Tx ${String(m.txid).slice(0, 16)}… confirmed in the wallet, below ` +
+                    `${config.mintOnchainMinReceiveSat.toLocaleString('en-US')} sat, so CDK will ` +
+                    `never credit it — its check is on the individual receive and ignores what the ` +
+                    `quote already holds. Booked straight to own capital; the mint owes nobody for ` +
+                    `it. Harmless while it sits. It stops being harmless if the wallet co-spends ` +
+                    `it, which links the sender's dust to the rest of the wallet — see ` +
+                    `mint_onchain_dust_cospent.`,
+                context: { txid: m.txid, amountSat: (amount / 1000n).toString() },
             })
         }
         return findings
@@ -859,6 +865,6 @@ export const mintRules = [
     largeOnchainMint,
     largeOnchainMelt,
     unattributedDeposit,
-    depositUncredited,
+    dustDeposit,
     dustCospent,
 ]

@@ -148,6 +148,9 @@ export interface MintUnitReading {
     /** Confirmed deposits with no matching mint quote. NOT a liability. */
     depositsUnattributed: bigint | null
     depositsUnattributedCount: number | null
+    /** Below the mint's minimum receive amount — never creditable, so own capital. */
+    depositsDust: bigint | null
+    depositsDustCount: number | null
 
     sagasInFlight: number
     meltRequestsInFlight: number
@@ -424,6 +427,14 @@ export class MintSource implements Source<MintReading> {
                 depositsUnattributedCount:
                     row.unit === config.backingUnit && config.mintRpc.enabled
                         ? deposits.unattributedCount
+                        : null,
+                depositsDust:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.dust
+                        : null,
+                depositsDustCount:
+                    row.unit === config.backingUnit && config.mintRpc.enabled
+                        ? deposits.dustCount
                         : null,
 
                 sagasInFlight: Number(t.sagas ?? 0),

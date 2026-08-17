@@ -204,6 +204,10 @@ model MintSnapshot {
   /// for these — so they raise own capital rather than unclaimed.
   depositsUnattributed        BigInt?
   depositsUnattributedCount   Int?
+  /// Confirmed deposits below the mint's `min_receive_amount_sat`, which CDK will
+  /// never credit. Own capital on sight — the mint owes ecash to nobody for them.
+  depositsDust                BigInt?
+  depositsDustCount           Int?
 
   /// The wallet's own chain tip. Cross-checked against LND's height, which comes
   /// from a completely independent node — a stalled BDK sync reports a stale
@@ -286,6 +290,19 @@ model Reconciliation {
   /// reading of the mint database.
   depositsAwaitingCredit BigInt @default(0)
 
+  /// Confirmed on-chain deposits below the mint's minimum receive amount.
+  ///
+  /// CDK's check is on the individual receive and ignores what the quote already
+  /// holds, so these can never become ecash. Not a liability: the mint owes nobody
+  /// for them, so they are own capital from the moment they confirm rather than
+  /// being parked in unclaimed awaiting an event that cannot happen.
+  ///
+  /// Subtracted in remainingDelta as EXPLAINED, which also makes a mis-set
+  /// MINT_ONCHAIN_MIN_RECEIVE_SAT self-correcting: this is a live set, so a
+  /// deposit CDK does credit leaves it at the same moment it enters `unclaimed`,
+  /// and the two movements cancel instead of reading as a shortfall.
+  dustReceived           BigInt @default(0)
+
   /// Cumulative mint input fees (keyset_amounts.fee_collected).
   ///
   /// Mint fees are taken by BURNING the wallet's ecash: inputs exceed outputs, so
@@ -305,6 +322,8 @@ model Reconciliation {
   /// the two are the same liability either side of CDK booking it, so a deposit
   /// moving from one to the other must net to zero.
   deltaDepositsAwaitingCredit BigInt?
+  /// Change in dust received. Subtracted for the same reason as the term above.
+  deltaDustReceived           BigInt?
   /// Change in declared cold-storage reserves. Subtracted below because an
   /// operator-declared movement is *explained* — without this, editing
   /// COLD_STORAGE_RESERVES would step ownCapital and read as drift.

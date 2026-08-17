@@ -174,6 +174,30 @@ export const config = {
     },
 
     /**
+     * The mint's `[bdk] min_receive_amount_sat`, in sat.
+     *
+     * A confirmed deposit below it is NEVER credited: CDK's check is
+     * `amount_sat < min_receive_amount_sat` on the individual receive, and it
+     * ignores what the quote already holds — so a small top-up to a well-funded
+     * quote is refused exactly like a first payment (verified against production:
+     * 18 on-chain payments booked, smallest exactly 10,000, none below).
+     *
+     * Such a deposit will never become ecash, so the mint owes nobody for it and
+     * it belongs to own capital from the moment it confirms rather than sitting in
+     * unclaimed waiting for something that cannot happen.
+     *
+     * Setting it wrong is safe. `dustReceived` is a LIVE set, not a cumulative
+     * one: if CDK does credit a deposit classified as dust, that deposit leaves
+     * the set as it enters `unclaimed` and the two movements cancel in
+     * `remainingDelta`. Set it too high and the only cost is having called
+     * something dust that was not.
+     *
+     * Zero disables the classification entirely — every deposit is then treated
+     * as potentially creditable and held in unclaimed indefinitely.
+     */
+    mintOnchainMinReceiveSat: intVar('MINT_ONCHAIN_MIN_RECEIVE_SAT', 0),
+
+    /**
      * bitcoind, used for exactly one question: which addresses did a given
      * transaction pay?
      *

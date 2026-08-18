@@ -8,6 +8,7 @@ import {
 } from '@/lib/api'
 import { formatAge, formatSat } from '@/lib/format'
 import { StatusPill } from '@/components/StatusPill'
+import { BlockHeight } from '@/components/BlockHeight'
 import { StatTile } from '@/components/StatTile'
 import { ChartCard } from '@/components/ChartCard'
 import { AlertPanel } from '@/components/AlertPanel'
@@ -159,6 +160,11 @@ export default function Dashboard() {
             LND <StatusPill status={status?.latestLndStatus ?? null} /> mint{' '}
             <StatusPill status={status?.latestMintStatus ?? null} />
           </span>
+          <BlockHeight
+            tip={observation?.lnd?.blockHeight ?? null}
+            syncedToChain={observation?.lnd?.syncedToChain ?? null}
+            walletHeight={observation?.mints?.[0]?.walletSyncedHeight ?? null}
+          />
           <span>last observation {formatAge(status?.latestObservedAt)}</span>
           <span>{loadedAt ? `refreshed ${loadedAt.toLocaleTimeString()}` : 'loading…'}</span>
         </div>

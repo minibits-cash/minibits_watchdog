@@ -168,7 +168,11 @@ export function ReconciliationPanel({
         <OfWhich
           label="of which unclaimed"
           value={r.unclaimed}
-          note={unclaimedSplit(r.unclaimed, mint?.unclaimedOnchain)}
+          note={unclaimedSplit(
+            r.unclaimed,
+            mint?.unclaimedOnchain,
+            mint?.depositsAwaitingCredit,
+          )}
         />
 
         {/*
@@ -450,15 +454,30 @@ function SubRow({
  * the case whenever the mint source failed but a reconciliation still exists
  * from an earlier tick.
  */
-function unclaimedSplit(total: string, onchain: string | null | undefined): string {
+function unclaimedSplit(
+  total: string,
+  onchain: string | null | undefined,
+  awaitingCredit: string | null | undefined,
+): string {
   const base = 'paid but ecash not yet issued'
   if (onchain === null || onchain === undefined) return base
 
   const chain = BigInt(onchain)
   const ln = BigInt(total) - chain
+  const pending = awaitingCredit ? BigInt(awaitingCredit) : 0n
 
   // Only ever one method in play — no point naming a split that is 0 / everything.
-  if (chain === 0n) return `${base} · all on Lightning`
+  //
+  // "all on Lightning" is a true statement about THIS figure, which counts only
+  // what CDK has booked. Said plainly while an unbooked on-chain deposit sits on
+  // the row below, it reads instead as "no on-chain obligations" — so when one
+  // is present the wording names the reason rather than inviting the reader to
+  // reconcile two lines that look contradictory and are not.
+  if (chain === 0n) {
+    return pending > 0n
+      ? `${base} · Lightning only — on-chain deposits not booked yet, see below`
+      : `${base} · all on Lightning`
+  }
   if (ln <= 0n) return `${base} · all on-chain`
 
   return `${base} · Lightning ${formatSat(ln.toString())} · on-chain ${formatSat(onchain)}`

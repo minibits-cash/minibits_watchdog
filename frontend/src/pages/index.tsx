@@ -108,20 +108,24 @@ export default function Dashboard() {
    * drops and `unclaimed` drops with it — routine operation, not a loss. Colouring
    * that red trains you to ignore the colour.
    *
-   * Because `ownCapitalNet = ownCapital − unclaimed`, the change in the NET line
-   * is exactly the part unclaimed does not account for. So the tile keys its tone
-   * and its wording off that, not off the raw change.
+   * So the tile keys its tone and its wording off `remaining` — own capital with
+   * every explained term removed — rather than off the raw change.
    *
-   * Sourced from /deltas rather than differenced from the plotted rows, so the
-   * tile, the change cards and the drift rules cannot report different numbers
-   * for the same window.
+   * `remaining` is taken from /deltas AS SERVED, not re-derived here. This used
+   * to compute `ownCapital − unclaimed`, which is that same identity missing five
+   * of its seven terms. An on-chain deposit awaiting credit then read as a
+   * six-figure "unexplained" GAIN in this tile while the card directly below it,
+   * using the full identity, reported a small loss — the tile's own claim to
+   * agree with the cards and the drift rules made the disagreement worse, not
+   * better. One number now, from one computation.
    */
   const change = (() => {
     const d = deltas?.deltas
     if (!d) return null
-    const own = satNum(d.ownCapital)
-    const unclaimed = satNum(d.unclaimed)
-    return { own, unexplained: own - unclaimed, unclaimed }
+    return {
+      unexplained: satNum(d.remaining),
+      unclaimed: satNum(d.unclaimed),
+    }
   })()
 
   const rangeLabel = RANGES.find((x) => x.value === minutes)?.label ?? `${minutes}m`

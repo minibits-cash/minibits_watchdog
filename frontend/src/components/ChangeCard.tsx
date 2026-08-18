@@ -91,6 +91,30 @@ export function ChangeCard({ data, error, stale }: DeltaCardProps) {
           <dl className="text-sm">
             <Row label="Δ Own capital" value={d.ownCapital} />
             <Row label="Δ Unclaimed" value={d.unclaimed} sign="−" note="explained by mint state" />
+            {/*
+              These two are liabilities and equity the mint database does not
+              show yet, and they are subtracted by /deltas, the stored
+              reconciliation row and the drift rule alike.
+
+              They are rendered unconditionally, at zero like the declared terms
+              below, because a hidden row makes the card stop adding up: an
+              on-chain deposit confirming mid-window moves own capital without
+              moving unclaimed, so the visible rows would understate the
+              subtraction by the whole deposit and the remaining delta would look
+              wrong by six figures while being right.
+            */}
+            <Row
+              label="Δ Deposits awaiting credit"
+              value={d.depositsAwaitingCredit}
+              sign="−"
+              note="confirmed on-chain, mint has not booked them"
+            />
+            <Row
+              label="Δ Dust received"
+              value={d.dustReceived}
+              sign="−"
+              note="below mint minimum · never creditable"
+            />
             <Row label="Δ Cold storage" value={d.coldStorage} sign="−" note="operator-declared" />
             <Row
               label="Δ Unspendable ecash"

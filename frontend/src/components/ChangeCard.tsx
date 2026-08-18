@@ -81,6 +81,46 @@ function DeltaCardShell({
   )
 }
 
+/**
+ * The subtracted half of the reconciliation identity, in the order the backend
+ * applies it, with the terms that did not move dropped.
+ *
+ * Hiding a term is only safe because the test is on the RENDERED figure being
+ * zero, and subtracting zero cannot change the total — so what is on screen
+ * still reconciles to Remaining delta exactly. Hiding a non-zero row would not
+ * be: an on-chain deposit confirming mid-window moves own capital without
+ * moving unclaimed, and dropping that row left the visible arithmetic short by
+ * the whole deposit while the total below it stayed right. That is the bug this
+ * list replaced, so the filter must never grow a condition other than "is zero".
+ *
+ * Compared as sat rather than msat because sat is what the row would display: a
+ * term under 1000 msat renders as "0", and showing a row whose figure reads zero
+ * is exactly what this is meant to avoid. Every term here is sat-denominated at
+ * source, so the two only differ in principle.
+ *
+ * Must stay term-for-term with /deltas, reconciliation.ts and
+ * reconciliationRules.ts — a term added there and missed here silently stops
+ * the card adding up.
+ */
+function subtractedTerms(d: NonNullable<DeltaResponse['deltas']>) {
+  return [
+    { label: 'Δ Unclaimed', value: d.unclaimed, note: 'explained by mint state' },
+    {
+      label: 'Δ Deposits awaiting credit',
+      value: d.depositsAwaitingCredit,
+      note: 'confirmed on-chain, mint has not booked them',
+    },
+    {
+      label: 'Δ Dust received',
+      value: d.dustReceived,
+      note: 'below mint minimum · never creditable',
+    },
+    { label: 'Δ Cold storage', value: d.coldStorage, note: 'operator-declared' },
+    { label: 'Δ Unspendable ecash', value: d.provablyUnspendable, note: 'operator-declared' },
+    { label: 'Δ Mint fees collected', value: d.mintFees, note: 'known income' },
+  ].filter((t) => BigInt(t.value) / 1000n !== 0n)
+}
+
 export function ChangeCard({ data, error, stale }: DeltaCardProps) {
   const d = data?.deltas
 
@@ -90,39 +130,9 @@ export function ChangeCard({ data, error, stale }: DeltaCardProps) {
         <>
           <dl className="text-sm">
             <Row label="Δ Own capital" value={d.ownCapital} />
-            <Row label="Δ Unclaimed" value={d.unclaimed} sign="−" note="explained by mint state" />
-            {/*
-              These two are liabilities and equity the mint database does not
-              show yet, and they are subtracted by /deltas, the stored
-              reconciliation row and the drift rule alike.
-
-              They are rendered unconditionally, at zero like the declared terms
-              below, because a hidden row makes the card stop adding up: an
-              on-chain deposit confirming mid-window moves own capital without
-              moving unclaimed, so the visible rows would understate the
-              subtraction by the whole deposit and the remaining delta would look
-              wrong by six figures while being right.
-            */}
-            <Row
-              label="Δ Deposits awaiting credit"
-              value={d.depositsAwaitingCredit}
-              sign="−"
-              note="confirmed on-chain, mint has not booked them"
-            />
-            <Row
-              label="Δ Dust received"
-              value={d.dustReceived}
-              sign="−"
-              note="below mint minimum · never creditable"
-            />
-            <Row label="Δ Cold storage" value={d.coldStorage} sign="−" note="operator-declared" />
-            <Row
-              label="Δ Unspendable ecash"
-              value={d.provablyUnspendable}
-              sign="−"
-              note="operator-declared"
-            />
-            <Row label="Δ Mint fees collected" value={d.mintFees} sign="−" note="known income" />
+            {subtractedTerms(d).map((t) => (
+              <Row key={t.label} label={t.label} value={t.value} sign="−" note={t.note} />
+            ))}
             <div
               className="mt-1 flex items-baseline justify-between gap-3 pt-2"
               style={{ borderTop: '1px solid var(--viz-axis)' }}
@@ -141,8 +151,9 @@ export function ChangeCard({ data, error, stale }: DeltaCardProps) {
 
           <p className="mt-2 text-xs" style={{ color: 'var(--viz-muted)' }}>
             Every subtracted term is an explained change, so what remains is the part nothing
-            accounts for. Remaining delta is node routing income, rounding of routing fees by the
-            mint or other that might need attention.
+            accounts for. Terms that did not move over the window are omitted. Remaining delta is
+            node routing income, rounding of routing fees by the mint or other that might need
+            attention.
           </p>
         </>
       )}

@@ -271,20 +271,35 @@ export interface MintWalletTx {
     confirmationTime: number | null
 }
 
+/** cdk-mintd rejects anything larger with INVALID_ARGUMENT. */
+export const WALLET_TX_MAX_PAGE = 100
+
+export interface WalletTxPage {
+    transactions: MintWalletTx[]
+    /** Transactions the wallet holds in total, before pagination. */
+    total: number
+}
+
 /**
- * Recent wallet transactions, newest first.
+ * One page of wallet transactions, newest first.
  *
- * `limit` is deliberately modest. This is polled every tick only to notice new
- * transactions — everything already seen is cached in MintWalletTx — so the page
- * needs to be large enough to cover the busiest plausible interval between
+ * The default page is deliberately modest. In steady state this is polled every
+ * tick only to notice NEW transactions — everything already seen is cached in
+ * MintWalletTx — so a page needs to cover the busiest plausible interval between
  * ticks, not the wallet's history.
+ *
+ * Rebuilding that history from empty is a different job; see
+ * listAllWalletTransactions().
  */
-export async function listWalletTransactions(limit = 50): Promise<MintWalletTx[]> {
+export async function listWalletTransactionPage(
+    limit = 50,
+    offset = 0,
+): Promise<WalletTxPage> {
     const c = getClient()
     const deadline = new Date(Date.now() + config.mintRpc.timeoutMs)
 
     const res = await new Promise<RawTxList>((resolve, reject) => {
-        c.ListTransactions({ limit, offset: 0 }, callMetadata(), { deadline }, (err, value) => {
+        c.ListTransactions({ limit: Math.min(limit, WALLET_TX_MAX_PAGE), offset }, callMetadata(), { deadline }, (err, value) => {
             if (err) {
                 reject(new Error(`${err.code ? `${grpc.status[err.code]}: ` : ''}${err.message}`))
                 return
@@ -297,16 +312,53 @@ export async function listWalletTransactions(limit = 50): Promise<MintWalletTx[]
         })
     })
 
-    return (res.transactions ?? []).map((t) => ({
-        txid: String(t.txid),
-        receivedMsat: satToMsat(t.received_sat),
-        sentMsat: satToMsat(t.sent_sat),
-        // Signed, so it cannot go through satToMsat's unsigned assumptions
-        // unexamined — an outgoing transaction's delta is negative.
-        balanceDeltaMsat: BigInt(t.balance_delta_sat ?? 0) * 1000n,
-        confirmationHeight: t.confirmation_height ? Number(t.confirmation_height) : null,
-        confirmationTime: t.confirmation_time ? Number(t.confirmation_time) : null,
-    }))
+    return {
+        transactions: (res.transactions ?? []).map((t) => ({
+            txid: String(t.txid),
+            receivedMsat: satToMsat(t.received_sat),
+            sentMsat: satToMsat(t.sent_sat),
+            // Signed, so it cannot go through satToMsat's unsigned assumptions
+            // unexamined — an outgoing transaction's delta is negative.
+            balanceDeltaMsat: BigInt(t.balance_delta_sat ?? 0) * 1000n,
+            confirmationHeight: t.confirmation_height ? Number(t.confirmation_height) : null,
+            confirmationTime: t.confirmation_time ? Number(t.confirmation_time) : null,
+        })),
+        total: Number(res.total ?? 0),
+    }
+}
+
+/**
+ * The wallet's entire transaction history, newest first.
+ *
+ * For rebuilding the cache from empty. The watchdog is meant to be a derived
+ * store, not a system of record — anything it holds should be reconstructible
+ * from the mint, the wallet and the chain — and a single fixed-size page quietly
+ * breaks that: a wallet with more transactions than one page would come back
+ * permanently missing its oldest, and an uncredited deposit among them would be
+ * lost from the liability side with nothing to indicate it.
+ *
+ * Bounded rather than unbounded: `maxPages` caps the work at a wallet far larger
+ * than a mint reserve wallet plausibly gets, and stopping short is logged rather
+ * than silent.
+ */
+export async function listAllWalletTransactions(
+    pageSize = WALLET_TX_MAX_PAGE,
+    maxPages = 50,
+): Promise<MintWalletTx[]> {
+    const out: MintWalletTx[] = []
+
+    for (let page = 0; page < maxPages; page++) {
+        const { transactions, total } = await listWalletTransactionPage(pageSize, page * pageSize)
+        out.push(...transactions)
+
+        // Short page means the end; the total check covers a wallet that grew
+        // between pages, where a full last page is not proof there is more.
+        if (transactions.length < pageSize) return out
+        if (out.length >= total) return out
+    }
+
+    log.warn('[mintRpc] transaction history hit the page cap', { collected: out.length })
+    return out
 }
 
 export function closeMintRpcClient(): void {

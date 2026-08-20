@@ -27,6 +27,26 @@
  * and on-chain reserves under-reporting for the life of the deployment, quietly,
  * because a smaller number looks plausible. Truncated as a pair, never alone.
  *
+ * ── Why MintWalletTx is safe to clear ───────────────────────────────────────
+ *
+ * It is derived, not recorded: every column comes from the wallet's transaction
+ * list, a bitcoind lookup, or the mint's own payment rows, so a cleared table
+ * refills itself. That matters as a design property — the watchdog should never
+ * be the only place a fact exists, or wiping it stops being a recovery option.
+ *
+ * Two conditions have to hold for the rebuild to be complete, and both are worth
+ * checking before a reset rather than after:
+ *
+ *   - the wallet's whole history must be readable. It is: the cache build
+ *     paginates when it finds itself behind the total the wallet reports, rather
+ *     than taking a single page and silently dropping the oldest.
+ *
+ *   - bitcoind must be reachable, and the deposits must still be above its prune
+ *     horizon. Classification needs the block. A pruned node keeps roughly 39
+ *     days at default settings, so anything older comes back PENDING and cannot
+ *     leave that state — which for an uncredited inbound deposit means it is
+ *     counted as owed.
+ *
  * ── Note on alerts ───────────────────────────────────────────────────────────
  *
  * Clearing `AlertState` means any condition still true fires — and notifies —
@@ -58,6 +78,7 @@ const DATA_TABLES = [
     'Event',
     'LedgerWatermark', // paired with MintOnchainQuote — see header
     'MintOnchainQuote',
+    'MintWalletTx', // rebuildable from the wallet, the chain and the mint — see header
 ]
 
 const maskedUrl = (process.env.DATABASE_URL ?? '').replace(/:[^:@/]*@/, ':***@')

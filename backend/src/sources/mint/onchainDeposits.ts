@@ -8,7 +8,11 @@ import {
     PAYMENTS_BOOKED_BY_TXID_PORTABLE,
     DB_COLLATION,
 } from './mintQueries'
-import { listWalletTransactions, MintWalletTx } from './mintRpcClient'
+import {
+    listAllWalletTransactions,
+    listWalletTransactionPage,
+    MintWalletTx,
+} from './mintRpcClient'
 import { txDetails, chainTip, isTransportFailure } from '../chain/bitcoinRpcClient'
 
 /**
@@ -188,7 +192,7 @@ export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
     let error: string | null = null
 
     try {
-        await cacheTransactions(await listWalletTransactions())
+        await cacheTransactions(await fetchWalletTransactions())
     } catch (e: any) {
         // NOT fatal, and specifically NOT a reason to return zero.
         //
@@ -229,6 +233,37 @@ export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
     await refreshCreditedStatus()
 
     return { ...(await summarise()), error, chainSourceError }
+}
+
+/**
+ * One page in steady state, the whole history when the cache is behind it.
+ *
+ * The watchdog is a derived store: everything it holds should be rebuildable
+ * from the mint, the wallet and the chain, so that wiping it is a recovery
+ * option rather than a loss. A fixed single page silently broke that — after a
+ * reset, a wallet with more transactions than the page size came back missing
+ * its oldest ones for good, taking any uncredited deposit among them off the
+ * liability side with no trace.
+ *
+ * Comparing the local row count against the total the wallet reports catches
+ * both the cold start and the subtler case: an instance down long enough for
+ * more than one page of transactions to accumulate.
+ *
+ * Costs one call in the ordinary case, which is every tick after the first.
+ */
+async function fetchWalletTransactions(): Promise<MintWalletTx[]> {
+    const cached = await prisma.mintWalletTx.count()
+    const page = await listWalletTransactionPage()
+
+    // `>=` rather than `===`: the cache is append-only and the wallet's own list
+    // need not be, so holding more than it reports is not a reason to refetch.
+    if (cached >= page.total) return page.transactions
+
+    log.info('[onchainDeposits] rebuilding wallet transaction cache', {
+        cached,
+        walletTotal: page.total,
+    })
+    return await listAllWalletTransactions()
 }
 
 /** Upsert what the wallet reports. Amounts and confirmation can both change. */

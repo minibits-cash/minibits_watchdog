@@ -234,6 +234,34 @@ legitimately stops owing them is a keyset phase-out, declared through
 | `backend/scripts/probe-mint-rpc.ts` | `yarn probe:mint-rpc` — BDK wallet balance beside the ledger estimate. |
 | `backend/scripts/backfill-onchain.mjs` | One-off. Repairs history after a change to what `Reserves` includes. Dry-run by default. |
 | `backend/scripts/reset-data.ts` | `yarn reset:data` — clear gathered data and/or reseed rule defaults. Dry-run by default. |
+| `backend/scripts/check-funding-address.ts` | `yarn check-funding-address <addr>` — pre-flight before sending operator liquidity to the mint's wallet. |
+
+## Resetting and rebuilding
+
+The watchdog is a **derived store, not a system of record.** Everything it holds
+comes from LND, the mint database, the BDK wallet or the chain, so clearing it is
+a recovery option rather than a loss — `yarn reset:data` exists for exactly that.
+Nothing should ever exist only here.
+
+What a reset reconstructs on the following ticks:
+
+| Rebuilt from | How complete |
+|---|---|
+| Reserve balances | Immediately — read live from LND and the wallet |
+| `unclaimed`, ledger estimate | Fully — accumulator watermarks restart at 0, so on-chain quote discovery rescans from genesis |
+| Wallet transaction cache | Fully — the build paginates when it is behind the wallet's reported total, rather than taking one page |
+| Deposit classification | Only for blocks **above bitcoind's prune horizon** (~39 days at defaults) |
+
+Two things do not come back, and both are history rather than state: the
+observation series behind the charts and delta windows, and alert history.
+Drift rules need two observations and a full window before they mean anything
+again, so expect a warm-up period. Clearing `AlertState` also means any condition
+still true re-fires and re-notifies on the next tick.
+
+The one real constraint is the prune horizon. A deposit confirmed in a block
+bitcoind no longer has cannot be classified, so it returns as `PENDING` — and an
+uncredited inbound deposit in that state is counted as owed. Check that the
+oldest uncredited deposit is inside the horizon before resetting.
 
 ## Before trusting reserve figures in production
 

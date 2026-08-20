@@ -303,6 +303,29 @@ model Reconciliation {
   /// and the two movements cancel instead of reading as a shortfall.
   dustReceived           BigInt @default(0)
 
+  /// Confirmed on-chain deposits matching no mint quote — operator liquidity.
+  ///
+  /// Recorded here ONLY so `mint_wallet_ledger_divergence` can subtract it. It is
+  /// deliberately NOT a term in remainingDelta, and that asymmetry with
+  /// `dustReceived` above is intentional rather than an oversight:
+  ///
+  ///   dust always arrives from outside, so it always raises reserves, and
+  ///   subtracting it keeps remainingDelta at zero.
+  ///
+  ///   operator liquidity arrives either from outside (reserves +X) or from the
+  ///   monitored LND wallet (reserves net 0, since both sit inside reserves).
+  ///   The identity cannot tell those apart, so subtracting it would be right for
+  ///   the first and would manufacture a −X shortfall for the second — firing
+  ///   reserve_drift_short CRITICAL on every internal rebalance.
+  ///
+  /// The divergence gap has no such ambiguity: the wallet rises by X either way
+  /// while CDK's ledger cannot see it, so subtracting X is correct in both cases.
+  ///
+  /// Cumulative arrivals, not value still held — which is what the gap needs.
+  /// Melts drop the wallet and the ledger equally, so spends cancel and the gap
+  /// equals the sum of uncredited deposits regardless of what was later spent.
+  depositsUnattributed   BigInt @default(0)
+
   /// Cumulative mint input fees (keyset_amounts.fee_collected).
   ///
   /// Mint fees are taken by BURNING the wallet's ecash: inputs exceed outputs, so

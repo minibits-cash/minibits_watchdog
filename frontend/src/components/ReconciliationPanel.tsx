@@ -201,19 +201,29 @@ export function ReconciliationPanel({
           Dust is separated from operator liquidity because the two differ in
           intent, not in accounting — sub-minimum deposits are uncreditable by
           CDK's own rule, and arrive from strangers rather than from the operator.
+
+          Both are RECEIVED-TO-DATE, not a share of the balance above, and the
+          labels say so. The underlying figures count every such deposit ever
+          seen — an uncredited deposit is deliberately exempt from the activity
+          window and never ages out — so once those coins are spent the total
+          stays put. That is the right basis for the divergence rule, which needs
+          cumulative arrivals, but under an "of which" heading it would eventually
+          read as nonsense: after enough operator injections and melts the
+          cumulative total can approach or exceed the wallet balance it appears
+          to be a portion of.
         */}
         {mint?.depositsDust && BigInt(mint.depositsDust) > 0n ? (
           <OfWhich
-            label="of which dust (uncreditable)"
+            label="dust received to date (uncreditable)"
             value={mint.depositsDust}
-            note={`${mint.depositsDustCount} deposit(s) below the mint minimum · never creditable, counted as equity`}
+            note={`${mint.depositsDustCount} deposit(s) below the mint minimum · never creditable, counted as equity · cumulative, not a share of the balance above`}
           />
         ) : null}
         {mint?.depositsUnattributed && BigInt(mint.depositsUnattributed) > 0n ? (
           <OfWhich
-            label="of which unattributed deposits"
+            label="operator liquidity received to date"
             value={mint.depositsUnattributed}
-            note={`${mint.depositsUnattributedCount} deposit(s) with no mint quote · operator liquidity, counted as equity`}
+            note={`${mint.depositsUnattributedCount} deposit(s) with no mint quote · counted as equity, never a liability · cumulative, not a share of the balance above`}
           />
         ) : null}
 

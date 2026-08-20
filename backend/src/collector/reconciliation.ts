@@ -63,6 +63,14 @@ export async function writeReconciliation(
     // an unexplained gain.
     const dustReceived = mintUnit.depositsDust ?? 0n
 
+    // Operator liquidity: confirmed, matches no quote, so the mint owes nobody
+    // for it. Own capital, like dust — but recorded here ONLY for the divergence
+    // rule, and deliberately absent from remainingDelta. See the schema comment:
+    // subtracting it would read an LND→BDK rebalance as a shortfall, because
+    // both wallets sit inside reserves and the identity cannot tell an internal
+    // move from an external injection.
+    const depositsUnattributed = mintUnit.depositsUnattributed ?? 0n
+
     // The mint's own on-chain wallet is a second asset pool it controls
     // directly, so it belongs in reserves alongside the node's balances.
     //
@@ -180,6 +188,7 @@ export async function writeReconciliation(
             unclaimed,
             depositsAwaitingCredit,
             dustReceived,
+            depositsUnattributed,
             mintFeesCollected,
             prevObservationId: prev?.observationId ?? null,
             elapsedMs,

@@ -473,15 +473,29 @@ export const walletLedgerDivergence: Rule = {
         // normal behaviour, not a bookkeeping discrepancy, and a rule that
         // cannot tell the difference trains the operator to ignore it.
         //
-        // Dust is subtracted for the same reason and is not a rounding detail: it
-        // accounts for the ENTIRE observed baseline gap on this mint. The wallet
-        // holds 2,503 sat of sub-minimum deposits that CDK never booked, so the
-        // ledger cannot see them and the wallet leads it by exactly that. Removing
-        // both explained components leaves a gap that starts at zero, which is what
-        // makes its movement meaningful rather than noise around an arbitrary
-        // historical offset.
+        // Dust is subtracted for the same reason and is not a rounding detail: for
+        // a long stretch it accounted for the ENTIRE baseline gap on this mint —
+        // 9,608 sat of sub-minimum deposits CDK never booked, so the ledger cannot
+        // see them and the wallet leads it by exactly that.
+        //
+        // `depositsUnattributed` belongs here for exactly the same reason dust
+        // does, and omitting it made every correct operator liquidity injection
+        // fire this rule: the wallet rises by the deposit while the ledger — which
+        // reads mint_quote.amount_paid — never sees a quote-free payment at all.
+        //
+        // It is subtracted HERE ONLY. remainingDelta must keep leaving it alone:
+        // an LND→BDK rebalance moves reserves not at all, so subtracting it there
+        // would invent a shortfall. See Reconciliation.depositsUnattributed.
+        //
+        // Cumulative arrivals rather than value still held, which is correct: a
+        // melt lowers the wallet and the ledger by the same amount, so spends
+        // cancel and the gap stays equal to the sum of uncredited deposits.
         const gapOf = (r: (typeof rows)[number]) =>
-            r.mintOnchain - (r.mintOnchainLedger ?? 0n) - r.depositsAwaitingCredit - r.dustReceived
+            r.mintOnchain -
+            (r.mintOnchainLedger ?? 0n) -
+            r.depositsAwaitingCredit -
+            r.dustReceived -
+            r.depositsUnattributed
 
         const first = rows[0]
         const last = rows[rows.length - 1]

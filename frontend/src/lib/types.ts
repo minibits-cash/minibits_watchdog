@@ -116,6 +116,13 @@ export interface Reconciliation {
   depositsAwaitingCredit: Msat
   /** Sub-minimum deposits CDK will never credit. Own capital, not a liability. */
   dustReceived: Msat
+  /**
+   * Confirmed deposits matching no mint quote — operator liquidity.
+   *
+   * Not a term in remainingDelta; carried so the divergence cross-check can be
+   * shown the way the rule computes it. Null on rows written before the column.
+   */
+  depositsUnattributed: Msat | null
   mintFeesCollected: Msat
   deltaOwnCapital: Msat | null
   deltaUnclaimed: Msat | null

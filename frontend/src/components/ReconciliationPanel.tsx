@@ -111,16 +111,23 @@ export function ReconciliationPanel({
                     ) : null}
 
                     {/*
-                      The cross-check. The gap's LEVEL is meaningless — the ledger
-                      accumulator was seeded from a watermark, not from genesis —
-                      so it is shown muted, while the rule alerts on it moving.
+                      The cross-check, shown muted because its LEVEL carries no
+                      judgement — what the rule alerts on is the gap MOVING.
+
+                      The note states the gap the way mint_wallet_ledger_divergence
+                      computes it, with the explained components removed. Showing
+                      the raw wallet-minus-ledger difference here instead put a
+                      ten-million-sat figure on screen labelled "alertable when this
+                      MOVES" while the rule was watching 665 — the panel and the
+                      alert describing the same thing with numbers four orders of
+                      magnitude apart.
                     */}
                     {mint?.onchainBalance ? (
                       <SubRow
                         label="↳ vs CDK ledger estimate"
                         value={mint.onchainBalance}
                         muted
-                        note={ledgerGapNote(r.mintOnchain, r.mintOnchainLedger)}
+                        note={ledgerGapNote(r)}
                       />
                     ) : null}
                   </>
@@ -502,13 +509,36 @@ function unclaimedSplit(
  * wrong, and would compete with the rule that watches the thing that does
  * matter: the gap changing.
  */
-function ledgerGapNote(wallet: string, ledger: string | null | undefined): string {
-  if (ledger === null || ledger === undefined) return 'cross-check · not recorded'
+/**
+ * Must stay term-for-term with `gapOf` in mintRules.ts.
+ *
+ * Every subtracted component is wallet value CDK's ledger structurally cannot
+ * see — a deposit it has not booked, dust it will never book, operator liquidity
+ * that never had a quote — so removing them leaves the part that is genuinely
+ * unaccounted for, which is the only part worth an alert.
+ *
+ * The raw difference is still worth stating, because a reader comparing this
+ * panel against `cdk-mint-cli` would otherwise not be able to reproduce either
+ * number.
+ */
+function ledgerGapNote(r: Reconciliation): string {
+  if (r.mintOnchainLedger === null || r.mintOnchainLedger === undefined) {
+    return 'cross-check · not recorded'
+  }
 
-  const gap = BigInt(wallet) - BigInt(ledger)
-  if (gap === 0n) return 'cross-check · in exact agreement'
+  const raw = BigInt(r.mintOnchain) - BigInt(r.mintOnchainLedger)
+  const explained =
+    BigInt(r.depositsAwaitingCredit) +
+    BigInt(r.dustReceived) +
+    BigInt(r.depositsUnattributed ?? '0')
+  const unexplained = raw - explained
 
-  return `cross-check · wallet is ${formatSat(gap.toString())} vs the books — alertable when this MOVES`
+  if (unexplained === 0n) return 'cross-check · fully explained — alertable when this MOVES'
+
+  const explainedNote =
+    explained === 0n ? '' : ` (raw ${formatSat(raw.toString())} less ${formatSat(explained.toString())} the ledger cannot see)`
+
+  return `cross-check · ${formatSat(unexplained.toString())} unexplained${explainedNote} — alertable when this MOVES`
 }
 
 function OfWhich({ label, value, note }: { label: string; value: string; note?: string }) {

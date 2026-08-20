@@ -339,6 +339,68 @@ export const walletRpcUnreachable: Rule = {
 }
 
 /**
+ * bitcoind unreachable — the deposit classifier's only source of truth about
+ * which address a payment landed on.
+ *
+ * CRITICAL rather than a warning, because this failure does not degrade to
+ * "unknown", it degrades to "the mint owes this". A deposit that cannot be
+ * attributed stays PENDING, and PENDING is summed into `depositsAwaitingCredit`
+ * — a liability. So a dead chain source silently moves own capital down by the
+ * full value of every deposit arriving while it is out, with nothing else on the
+ * dashboard saying why. Of every external dependency the watchdog has, this is
+ * the only one whose failure rewrites the accounts.
+ *
+ * Driven by an unconditional liveness probe rather than by classification
+ * errors, so it fires on the outage itself instead of waiting for a deposit to
+ * expose it.
+ */
+export const chainSourceUnreachable: Rule = {
+    id: 'mint_chain_source_unreachable',
+    description: 'bitcoind could not be reached, so on-chain deposits cannot be attributed',
+    defaults: {
+        severity: 'CRITICAL',
+        // ~15 minutes at the default cadence: long enough to ride out a bitcoind
+        // restart, short enough to catch a deposit arriving during the outage.
+        forEvaluations: 3,
+        clearEvaluations: 1,
+        cooldownSeconds: 3600,
+        notifyOnResolve: true,
+    },
+    async evaluate({ observation }) {
+        // Unset is a deployment choice, not an alert. The classifier falls back
+        // to inference, which resolves a deposit only once CDK books a payment
+        // for it — so operator liquidity, which never gets a payment row, stays
+        // a liability forever. That tradeoff belongs in the startup banner.
+        if (!config.bitcoinRpc.enabled) return null
+        if (!observation.mints?.length) return null
+
+        for (const m of observation.mints) {
+            if (m.unit !== config.backingUnit) continue
+
+            const chain = ((m.raw ?? {}) as any)?.chainSource
+            // Older rows predate the field. Absence is not evidence of failure.
+            if (!chain || chain.configured === false) return null
+            if (chain.ok) return []
+
+            return [
+                {
+                    dedupeKey: m.unit,
+                    title: 'Chain source (bitcoind) unreachable',
+                    detail:
+                        `${String(chain.error ?? 'no error recorded')}. ` +
+                        `On-chain deposits cannot be attributed to a mint quote while this holds, ` +
+                        `so any that arrive are counted as owed — depressing own capital until it ` +
+                        `clears. Attempt budgets are NOT being consumed, so classification resumes ` +
+                        `by itself once bitcoind answers.`,
+                    context: { unit: m.unit, url: config.bitcoinRpc.url },
+                },
+            ]
+        }
+        return null
+    },
+}
+
+/**
  * The gap between the measured BDK wallet balance and what CDK's ledger implies
  * it should be — and specifically, that gap CHANGING.
  *
@@ -860,6 +922,7 @@ export const mintRules = [
     meltRequestsStuck,
     onchainMeltStuck,
     walletRpcUnreachable,
+    chainSourceUnreachable,
     walletLedgerDivergence,
     walletSync,
     largeOnchainMint,

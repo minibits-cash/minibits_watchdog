@@ -17,7 +17,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:updateTypes": "prisma generate",
-    "prisma:updateDb": "prisma db push"
+    "prisma:updateDb": "prisma db push",
+    "check-funding-address": "esbuild scripts/check-funding-address.ts --bundle --platform=node --target=es2022 --format=esm --packages=external --outfile=dist/check-funding-address.js --log-level=warning && node dist/check-funding-address.js"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

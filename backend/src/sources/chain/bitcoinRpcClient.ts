@@ -35,7 +35,34 @@ export interface TxOutput {
     valueSat: bigint
 }
 
-class BitcoinRpcError extends Error {}
+class BitcoinRpcError extends Error {
+    /**
+     * True when the call never got an answer OUT of bitcoind — bad URL, refused
+     * connection, timeout, rejected credentials, HTTP-level failure.
+     *
+     * The distinction drives the retry cap in onchainDeposits.ts and it is not
+     * cosmetic. A transport failure says nothing whatsoever about whether a
+     * transaction is classifiable, so counting it against a per-transaction
+     * attempt budget converts an outage into permanent data loss: a scheme-less
+     * BITCOIN_RPC_URL once burned all 12 attempts on 18 deposits in an hour and
+     * stranded 2,279,267 sat as a liability that fixing bitcoind could not clear.
+     *
+     * An error bitcoind itself returned (`body.error`) is NOT transport: "Block
+     * not available (pruned data)" is a real, permanent answer about that
+     * transaction, and should count.
+     */
+    readonly transport: boolean
+
+    constructor(message: string, transport = false) {
+        super(message)
+        this.transport = transport
+    }
+}
+
+/** Did this failure mean "bitcoind never answered", rather than "bitcoind said no"? */
+export function isTransportFailure(e: unknown): boolean {
+    return e instanceof BitcoinRpcError && e.transport
+}
 
 let cookieCache: { path: string; mtimeMs: number; value: string } | undefined
 
@@ -83,6 +110,7 @@ async function call<T>(method: string, params: unknown[]): Promise<T> {
             throw new BitcoinRpcError(
                 'bitcoind rejected the credentials (401). Check BITCOIN_RPC_USER/PASSWORD, or ' +
                     'BITCOIN_RPC_COOKIE if the node uses cookie auth.',
+                true,
             )
         }
 
@@ -94,15 +122,17 @@ async function call<T>(method: string, params: unknown[]): Promise<T> {
             throw new BitcoinRpcError(`${method}: ${body.error.message ?? JSON.stringify(body.error)}`)
         }
         if (!res.ok) {
-            throw new BitcoinRpcError(`${method}: HTTP ${res.status}`)
+            throw new BitcoinRpcError(`${method}: HTTP ${res.status}`, true)
         }
 
         return body.result as T
     } catch (e: any) {
         if (e?.name === 'AbortError') {
-            throw new BitcoinRpcError(`${method}: timed out after ${config.bitcoinRpc.timeoutMs}ms`)
+            throw new BitcoinRpcError(`${method}: timed out after ${config.bitcoinRpc.timeoutMs}ms`, true)
         }
-        throw e instanceof BitcoinRpcError ? e : new BitcoinRpcError(`${method}: ${String(e?.message ?? e)}`)
+        // Anything thrown by fetch itself never reached the node: an unparseable
+        // URL, DNS failure, refused connection, socket reset.
+        throw e instanceof BitcoinRpcError ? e : new BitcoinRpcError(`${method}: ${String(e?.message ?? e)}`, true)
     } finally {
         clearTimeout(timer)
     }
@@ -170,4 +200,17 @@ export async function chainInfo(): Promise<{ chain: string; blocks: number; prun
         blocks: Number(info?.blocks ?? 0),
         pruned: Boolean(info?.pruned ?? false),
     }
+}
+
+/**
+ * Cheapest possible liveness check — one integer, no block data.
+ *
+ * Exists so the chain source can be checked on EVERY tick rather than only when
+ * there is a deposit to classify. Without it a dead bitcoind is invisible until
+ * a deposit happens to arrive, and by then it has already moved the books:
+ * an unclassifiable deposit is booked as `depositsAwaitingCredit`, so the
+ * failure mode is not "unknown" but "the mint owes this".
+ */
+export async function chainTip(): Promise<number> {
+    return await call<number>('getblockcount', [])
 }

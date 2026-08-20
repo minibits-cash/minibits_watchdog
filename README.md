@@ -245,7 +245,7 @@ legitimately stops owing them is a keyset phase-out, declared through
 
 ## Rules
 
-22 rules, all tunable at runtime without a redeploy — see [Editing rule
+23 rules, all tunable at runtime without a redeploy — see [Editing rule
 configuration](#editing-rule-configuration). Logic lives in `backend/src/rules/`; only the
 thresholds live in the database.
 
@@ -282,6 +282,7 @@ Only evaluated when `MINT_RPC_HOST` is set; they return "not evaluable" otherwis
 | Rule | Severity | for | Kind | Fires when |
 |---|---|---|---|---|
 | `mint_wallet_rpc_unreachable` | CRITICAL | 3 | state | The wallet balance could not be read. No reconciliation row is written while it holds, so reserve drift is not being evaluated |
+| `mint_chain_source_unreachable` | CRITICAL | 3 | state | bitcoind could not be reached. Deposits cannot be attributed to a quote while it holds, so any that arrive are counted as owed. Only evaluated when `BITCOIN_RPC_URL` is set; classification attempt budgets are not consumed, so it self-heals |
 | `mint_wallet_ledger_divergence` | WARNING | 3 | state | The wallet-versus-ledger gap moved more than `thresholdSat` (50,000) over `windowHours` (24). Deposits awaiting credit and dust are both subtracted, so the gap starts at zero |
 | `mint_wallet_sync` | WARNING / CRITICAL | 3 | state | The wallet is more than `maxBlocksBehind` (6) behind LND's height, or on a network other than `expectedNetwork` (CRITICAL) |
 

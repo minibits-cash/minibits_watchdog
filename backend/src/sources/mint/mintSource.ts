@@ -468,6 +468,13 @@ export class MintSource implements Source<MintReading> {
                 walletRpc: config.mintRpc.enabled
                     ? { ok: wallet !== null, error: walletError }
                     : { configured: false },
+                // Carried so `mint_chain_source_unreachable` has a signal that
+                // does not depend on a deposit happening to be pending. A dead
+                // chain source silently books unclassifiable deposits as owed,
+                // so it changes the accounts rather than merely losing detail.
+                chainSource: config.bitcoinRpc.enabled
+                    ? { ok: deposits.chainSourceError === null, error: deposits.chainSourceError }
+                    : { configured: false },
                 // Only movements inside the freshness window, and only on the
                 // backing unit — this lands in every snapshot's `raw`, so it has
                 // to stay small. The large-mint / large-melt / unattributed

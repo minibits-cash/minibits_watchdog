@@ -102,6 +102,20 @@ interface RawTxList {
     total: string
 }
 
+interface RawAddress {
+    address: string
+    keychain: string
+    derivation_index: number
+    used: boolean
+    balance_sat: string
+    confirmed_balance_sat: string
+}
+
+interface RawAddressList {
+    addresses: RawAddress[]
+    total: string
+}
+
 /** Minimal shape of the generated stub — only the methods we actually call. */
 interface WalletServiceClient extends grpc.Client {
     GetBalance(
@@ -115,6 +129,12 @@ interface WalletServiceClient extends grpc.Client {
         metadata: grpc.Metadata,
         options: grpc.CallOptions,
         cb: (err: grpc.ServiceError | null, res?: RawTxList) => void,
+    ): void
+    ListAddresses(
+        req: { limit: number; offset: number },
+        metadata: grpc.Metadata,
+        options: grpc.CallOptions,
+        cb: (err: grpc.ServiceError | null, res?: RawAddressList) => void,
     ): void
 }
 
@@ -294,4 +314,70 @@ export function closeMintRpcClient(): void {
         client.close()
         client = undefined
     }
+}
+
+export interface WalletAddress {
+    address: string
+    keychain: string
+    derivationIndex: number
+    /** Has any wallet transaction touched it. Reuse is a privacy loss, not an error. */
+    used: boolean
+    balanceMsat: bigint
+    confirmedBalanceMsat: bigint
+}
+
+/**
+ * Every address the wallet has revealed, in derivation order.
+ *
+ * Used by scripts/check-funding-address.ts to answer the question that matters
+ * before the operator sends liquidity to the mint: does this address really
+ * belong to the mint's wallet? A typo is an unrecoverable loss, and CDK's own
+ * tooling will not tell you.
+ *
+ * Paginated because the answer must be complete — a partial list would turn
+ * "not found" into a false alarm, or worse, hide a collision.
+ */
+export async function listWalletAddresses(pageSize = 500, maxPages = 40): Promise<WalletAddress[]> {
+    const c = getClient()
+    const out: WalletAddress[] = []
+
+    for (let page = 0; page < maxPages; page++) {
+        const deadline = new Date(Date.now() + config.mintRpc.timeoutMs)
+        const res = await new Promise<RawAddressList>((resolve, reject) => {
+            c.ListAddresses(
+                { limit: pageSize, offset: page * pageSize },
+                callMetadata(),
+                { deadline },
+                (err, value) => {
+                    if (err) {
+                        reject(new Error(`${err.code ? `${grpc.status[err.code]}: ` : ''}${err.message}`))
+                        return
+                    }
+                    if (!value) {
+                        reject(new Error('ListAddresses returned no value'))
+                        return
+                    }
+                    resolve(value)
+                },
+            )
+        })
+
+        const batch = res.addresses ?? []
+        for (const a of batch) {
+            out.push({
+                address: a.address,
+                keychain: String(a.keychain ?? ''),
+                derivationIndex: Number(a.derivation_index ?? 0),
+                used: Boolean(a.used),
+                balanceMsat: satToMsat(a.balance_sat),
+                confirmedBalanceMsat: satToMsat(a.confirmed_balance_sat),
+            })
+        }
+
+        if (batch.length < pageSize) return out
+        if (out.length >= Number(res.total ?? 0)) return out
+    }
+
+    log.warn('[mintRpc] address listing hit the page cap', { collected: out.length })
+    return out
 }

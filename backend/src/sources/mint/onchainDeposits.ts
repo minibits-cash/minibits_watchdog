@@ -9,7 +9,7 @@ import {
     DB_COLLATION,
 } from './mintQueries'
 import { listWalletTransactions, MintWalletTx } from './mintRpcClient'
-import { txDetails } from '../chain/bitcoinRpcClient'
+import { txDetails, chainTip, isTransportFailure } from '../chain/bitcoinRpcClient'
 
 /**
  * Classifies movements of the mint's BDK wallet, and measures the one quantity
@@ -157,6 +157,14 @@ export interface OnchainDepositReading {
      */
     uncredited: UncreditedDeposit[]
     error: string | null
+    /**
+     * Why the chain source is unusable this tick, or null when it is fine.
+     *
+     * Reported UNCONDITIONALLY when bitcoind is configured, not only when there
+     * was something to classify — see chainTip(). `mint_chain_source_unreachable`
+     * reads it out of the mint snapshot's `raw`.
+     */
+    chainSourceError: string | null
 }
 
 const EMPTY: OnchainDepositReading = {
@@ -171,6 +179,7 @@ const EMPTY: OnchainDepositReading = {
     movements: [],
     uncredited: [],
     error: null,
+    chainSourceError: null,
 }
 
 export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
@@ -194,6 +203,18 @@ export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
         error = String(e?.message ?? e)
     }
 
+    // Liveness first, so a dead chain source is reported even on a tick with
+    // nothing to classify. Cheap enough to be unconditional: one integer.
+    let chainSourceError: string | null = null
+    if (config.bitcoinRpc.enabled) {
+        try {
+            await chainTip()
+        } catch (e: any) {
+            chainSourceError = String(e?.message ?? e)
+            log.warn('[onchainDeposits] chain source unreachable', { message: chainSourceError })
+        }
+    }
+
     // Dust first, and deliberately before the chain lookups: it is decided by
     // amount alone, so it needs no chain source at all and it saves a lookup on
     // every deposit that turns out to be uncreditable anyway.
@@ -201,10 +222,13 @@ export async function collectOnchainDeposits(): Promise<OnchainDepositReading> {
 
     // Both work from the cache and the mint database, so they still make
     // progress when the wallet RPC is the thing that is down.
-    await classifyPending()
+    // Skipped outright when the probe already failed: every call would fail the
+    // same way, and the point of the transport carve-out below is that such
+    // failures must not consume the per-deposit attempt budget.
+    if (chainSourceError === null) await classifyPending()
     await refreshCreditedStatus()
 
-    return { ...(await summarise()), error }
+    return { ...(await summarise()), error, chainSourceError }
 }
 
 /** Upsert what the wallet reports. Amounts and confirmation can both change. */
@@ -355,6 +379,30 @@ async function classifyPending(): Promise<void> {
             })
         } catch (e: any) {
             const message = String(e?.message ?? e)
+
+            // A failure that never reached bitcoind is not evidence about THIS
+            // transaction, so it must not consume its attempt budget. Charging
+            // it turns an outage into permanent data loss: once a deposit hits
+            // MAX_CLASSIFY_ATTEMPTS it drops out of the query above for good and
+            // stays booked as a liability, which no amount of fixing bitcoind
+            // afterwards can undo — it takes manual SQL. A scheme-less
+            // BITCOIN_RPC_URL did exactly this to 18 deposits in one hour.
+            //
+            // Every remaining deposit this tick would fail identically, so the
+            // loop stops rather than logging the same outage once per row.
+            if (isTransportFailure(e)) {
+                await prisma.mintWalletTx.update({
+                    where: { txid: tx.txid },
+                    data: { classifyError: message },
+                })
+                log.warn('[onchainDeposits] chain source unreachable, classification deferred', {
+                    txid: tx.txid,
+                    message,
+                    note: 'attempt budget deliberately not charged',
+                })
+                return
+            }
+
             await prisma.mintWalletTx.update({
                 where: { txid: tx.txid },
                 data: { classifyError: message, classifyAttempts: { increment: 1 } },
@@ -581,5 +629,7 @@ async function summarise(): Promise<OnchainDepositReading> {
         movements,
         uncredited,
         error: null,
+        // Both filled in by the caller, which knows how the reads went.
+        chainSourceError: null,
     }
 }

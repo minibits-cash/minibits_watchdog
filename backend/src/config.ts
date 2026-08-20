@@ -64,6 +64,32 @@ const mintRpcEnabled = mintEnabled && mintRpcHost !== ''
 
 const bitcoinRpcUrl = optional('BITCOIN_RPC_URL')
 
+/**
+ * Validated at boot, because the failure mode otherwise is silent and expensive.
+ *
+ * `enabled` is just "is the string non-empty", so a malformed URL leaves the
+ * chain source switched ON while every request throws inside fetch. Deposits
+ * then stay unclassified and are booked as owed. A missing scheme —
+ * `10.7.1.33:8332` rather than `http://10.7.1.33:8332` — is the easy mistake,
+ * and once cost a week of wrong reserve accounting plus manual SQL to unpick.
+ * One second at startup is a better place to find out.
+ */
+if (bitcoinRpcUrl !== '') {
+    try {
+        const parsed = new URL(bitcoinRpcUrl)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error(`unsupported protocol "${parsed.protocol}"`)
+        }
+    } catch (e: any) {
+        console.error(
+            `FATAL: BITCOIN_RPC_URL is not a usable URL: ${String(e?.message ?? e)}\n` +
+                `       It needs a scheme — http://127.0.0.1:8332, not 127.0.0.1:8332.\n` +
+                `       Leave it empty to run without a chain source.`,
+        )
+        process.exit(1)
+    }
+}
+
 function requiredIf(enabled: boolean, name: string): string {
     return enabled ? required(name) : optional(name)
 }

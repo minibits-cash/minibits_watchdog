@@ -35,6 +35,7 @@ export function ReconciliationPanel({
   }
 
   const reserves = BigInt(r.totalNodeBalance) + BigInt(r.coldStorage) + BigInt(r.mintOnchain)
+  const crossCheck = ledgerCrossCheck(r)
 
   return (
     <Card>
@@ -124,10 +125,10 @@ export function ReconciliationPanel({
                     */}
                     {mint?.onchainBalance ? (
                       <SubRow
-                        label="↳ vs CDK ledger estimate"
-                        value={mint.onchainBalance}
+                        label="↳ unexplained vs CDK ledger"
+                        value={crossCheck.value}
                         muted
-                        note={ledgerGapNote(r)}
+                        note={crossCheck.note}
                       />
                     ) : null}
                   </>
@@ -510,20 +511,26 @@ function unclaimedSplit(
  * matter: the gap changing.
  */
 /**
- * Must stay term-for-term with `gapOf` in mintRules.ts.
+ * The cross-check row: what the divergence rule actually watches.
  *
- * Every subtracted component is wallet value CDK's ledger structurally cannot
- * see — a deposit it has not booked, dust it will never book, operator liquidity
- * that never had a quote — so removing them leaves the part that is genuinely
- * unaccounted for, which is the only part worth an alert.
+ * Must stay term-for-term with `gapOf` in mintRules.ts. Every subtracted
+ * component is wallet value CDK's ledger structurally cannot see — a deposit it
+ * has not booked, dust it will never book, operator liquidity that never had a
+ * quote — so what remains is the part genuinely unaccounted for.
  *
- * The raw difference is still worth stating, because a reader comparing this
- * panel against `cdk-mint-cli` would otherwise not be able to reproduce either
- * number.
+ * The RESIDUAL is the headline figure, not the ledger estimate. The estimate
+ * itself is `Σ amount_paid − melts − in-flight`, which goes structurally negative
+ * once the wallet is funded outside the quote system: those sats were never
+ * booked as arriving but are certainly seen leaving. Showing −480,912 as the
+ * value while the rule watched 665 made a healthy cross-check look broken.
+ *
+ * The estimate and the raw difference stay in the note, because a reader
+ * comparing this panel against `cdk-mint-cli` needs to be able to reproduce
+ * both numbers.
  */
-function ledgerGapNote(r: Reconciliation): string {
+function ledgerCrossCheck(r: Reconciliation): { value: string; note: string } {
   if (r.mintOnchainLedger === null || r.mintOnchainLedger === undefined) {
-    return 'cross-check · not recorded'
+    return { value: '0', note: 'cross-check · not recorded' }
   }
 
   const raw = BigInt(r.mintOnchain) - BigInt(r.mintOnchainLedger)
@@ -533,13 +540,21 @@ function ledgerGapNote(r: Reconciliation): string {
     BigInt(r.depositsUnattributed ?? '0')
   const unexplained = raw - explained
 
-  if (unexplained === 0n) return 'cross-check · fully explained — alertable when this MOVES'
+  const ledger = `ledger reads ${formatSat(r.mintOnchainLedger)}`
+  const derivation =
+    explained === 0n
+      ? `raw gap ${formatSat(raw.toString())}`
+      : `raw gap ${formatSat(raw.toString())} less ${formatSat(explained.toString())} the ledger cannot see`
 
-  const explainedNote =
-    explained === 0n ? '' : ` (raw ${formatSat(raw.toString())} less ${formatSat(explained.toString())} the ledger cannot see)`
-
-  return `cross-check · ${formatSat(unexplained.toString())} unexplained${explainedNote} — alertable when this MOVES`
+  return {
+    value: unexplained.toString(),
+    note:
+      unexplained === 0n
+        ? `${ledger} · fully explained — alertable when this MOVES`
+        : `${ledger} · ${derivation} — alertable when this MOVES`,
+  }
 }
+
 
 function OfWhich({ label, value, note }: { label: string; value: string; note?: string }) {
   return (

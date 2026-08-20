@@ -550,8 +550,8 @@ function ledgerCrossCheck(r: Reconciliation): { value: string; note: string } {
     value: unexplained.toString(),
     note:
       unexplained === 0n
-        ? `${ledger} · fully explained — alertable when this MOVES`
-        : `${ledger} · ${derivation} — alertable when this MOVES`,
+        ? `${ledger} · fully explained`
+        : `${ledger} · ${derivation}`,
   }
 }
 

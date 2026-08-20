@@ -224,14 +224,14 @@ export function ReconciliationPanel({
           <OfWhich
             label="dust received to date (uncreditable)"
             value={mint.depositsDust}
-            note={`${mint.depositsDustCount} deposit(s) below the mint minimum · never creditable, counted as equity · cumulative, not a share of the balance above`}
+            note={`${mint.depositsDustCount} deposit(s) below the mint minimum · increases own capital · cumulative`}
           />
         ) : null}
         {mint?.depositsUnattributed && BigInt(mint.depositsUnattributed) > 0n ? (
           <OfWhich
-            label="operator liquidity received to date"
+            label="liquidity sent to the mint's onchain wallet"
             value={mint.depositsUnattributed}
-            note={`${mint.depositsUnattributedCount} deposit(s) with no mint quote · counted as equity, never a liability · cumulative, not a share of the balance above`}
+            note={`${mint.depositsUnattributedCount} deposit(s) with no mint quote · increases own capital · cumulative`}
           />
         ) : null}
 

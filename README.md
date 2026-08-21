@@ -229,6 +229,7 @@ legitimately stops owing them is a keyset phase-out, declared through
 | `scripts/verify-mint-light.sql` | The per-tick query set. Index-assisted, negligible cost. |
 | `scripts/explain-mint-queries.sql` | `EXPLAIN` without `ANALYZE`. Nothing executed. |
 | `scripts/verify-mint-accounting.sql` | Full ledger cross-check. **Scans the two largest tables.** |
+| `scripts/verify-wallet-ledger-gap.sql` | Decomposes `mint_wallet_ledger_divergence` per tick. Runs against `DATABASE_URL`, not the mint. |
 | `backend/scripts/run-sql.mjs` | Runs a single-statement `.sql` file through the app's read-only path. |
 | `backend/scripts/probe-lnd.ts` | `yarn probe:lnd` — reads LND through the real collector code path. |
 | `backend/scripts/probe-mint-rpc.ts` | `yarn probe:mint-rpc` — BDK wallet balance beside the ledger estimate. |
@@ -311,7 +312,7 @@ Only evaluated when `MINT_RPC_HOST` is set; they return "not evaluable" otherwis
 |---|---|---|---|---|
 | `mint_wallet_rpc_unreachable` | CRITICAL | 3 | state | The wallet balance could not be read. No reconciliation row is written while it holds, so reserve drift is not being evaluated |
 | `mint_chain_source_unreachable` | CRITICAL | 3 | state | bitcoind could not be reached. Deposits cannot be attributed to a quote while it holds, so any that arrive are counted as owed. Only evaluated when `BITCOIN_RPC_URL` is set; classification attempt budgets are not consumed, so it self-heals |
-| `mint_wallet_ledger_divergence` | WARNING | 3 | state | The wallet-versus-ledger gap moved more than `thresholdSat` (50,000) over `windowHours` (24). Deposits awaiting credit and dust are both subtracted, so the gap starts at zero |
+| `mint_wallet_ledger_divergence` | WARNING | 3 | state | The wallet-versus-ledger gap moved more than `thresholdSat` (50,000) over `windowHours` (24). Deposits awaiting credit, dust and operator liquidity are all subtracted, so the gap starts at zero and is unaffected by a deposit being reclassified |
 | `mint_wallet_sync` | WARNING / CRITICAL | 3 | state | The wallet is more than `maxBlocksBehind` (6) behind LND's height, or on a network other than `expectedNetwork` (CRITICAL) |
 
 ### Mint — on-chain movements

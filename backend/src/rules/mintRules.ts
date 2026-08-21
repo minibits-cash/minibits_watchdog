@@ -420,6 +420,20 @@ export const chainSourceUnreachable: Rule = {
  *
  * Both endpoints must be on the WALLET basis. Comparing across the changeover
  * would measure the switch itself.
+ *
+ * Deliberately NOT guarded against the watchdog's own cold start. That looks
+ * like it should be needed and is not: on the first tick after a reset the
+ * wallet cache is rebuilt in full, and every deposit the classifier has not
+ * reached yet is PENDING, which summarise() reports as awaiting credit. gapOf
+ * subtracts that, subtracts UNATTRIBUTED, and subtracts DUST — so value moving
+ * between those three as attribution completes leaves the gap unchanged. The
+ * invariant is that every classification a deposit can hold is subtracted, and
+ * it is the reason a reset is a safe operation rather than an alerting event.
+ *
+ * The one state that breaks it is a deposit missing from the cache entirely,
+ * which contributes to no term at all and reads as a wallet surplus. That is a
+ * property of an incomplete cache, not of a reset, and wants a completeness
+ * flag on the row rather than a time window after genesis.
  */
 export const walletLedgerDivergence: Rule = {
     id: 'mint_wallet_ledger_divergence',
@@ -501,8 +515,8 @@ export const walletLedgerDivergence: Rule = {
         const last = rows[rows.length - 1]
         const change = gapOf(last) - gapOf(first)
 
-        const magnitude = change < 0n ? -change : change
-        if (magnitude < threshold) return []
+        const abs = (v: bigint) => (v < 0n ? -v : v)
+        if (abs(change) < threshold) return []
 
         const elapsedH =
             (last.observation.observedAt.getTime() - first.observation.observedAt.getTime()) /
@@ -521,6 +535,31 @@ export const walletLedgerDivergence: Rule = {
                 : 'a deposit against a quote created before the watchdog began discovery, or ' +
                   'funds sent to the wallet outside any quote'
 
+        // The gap is a difference of five independently moving terms, and naming
+        // only the total sends the operator to look at the wallet when it was the
+        // ledger that moved. Each entry is that term's CONTRIBUTION to the change,
+        // signed so the listed contributions sum to `change` exactly — which makes
+        // the alert checkable by hand rather than merely assertable.
+        const signed = (v: bigint) => (v > 0n ? '+' : '') + formatSat(v)
+        const movers = [
+            { label: 'wallet', value: last.mintOnchain - first.mintOnchain },
+            {
+                label: 'ledger',
+                value: -((last.mintOnchainLedger ?? 0n) - (first.mintOnchainLedger ?? 0n)),
+            },
+            {
+                label: 'awaiting credit',
+                value: -(last.depositsAwaitingCredit - first.depositsAwaitingCredit),
+            },
+            { label: 'dust', value: -(last.dustReceived - first.dustReceived) },
+            {
+                label: 'operator liquidity',
+                value: -(last.depositsUnattributed - first.depositsUnattributed),
+            },
+        ]
+            .filter((c) => c.value !== 0n)
+            .sort((a, b) => (abs(a.value) < abs(b.value) ? 1 : -1))
+
         return [
             {
                 dedupeKey: unit,
@@ -528,16 +567,22 @@ export const walletLedgerDivergence: Rule = {
                 detail:
                     `Candidates: ${candidates}. Wallet ${formatSat(last.mintOnchain)} sat vs ledger ` +
                     `${formatSat(last.mintOnchainLedger ?? 0n)} sat, less ` +
-                    `${formatSat(last.depositsAwaitingCredit)} sat awaiting credit and ` +
-                    `${formatSat(last.dustReceived)} sat of dust — ` +
+                    `${formatSat(last.depositsAwaitingCredit)} sat awaiting credit, ` +
+                    `${formatSat(last.dustReceived)} sat of dust and ` +
+                    `${formatSat(last.depositsUnattributed)} sat of operator liquidity — ` +
                     `an unexplained gap of ${formatSat(gapOf(last))} sat, which moved ` +
-                    `${formatSat(change)} sat across ${elapsedH.toFixed(1)}h. The level is not the ` +
-                    `signal; the movement is. Threshold ${formatSat(threshold)} sat.`,
+                    `${formatSat(change)} sat across ${elapsedH.toFixed(1)}h ` +
+                    `(${movers.map((c) => `${c.label} ${signed(c.value)}`).join(', ')}). ` +
+                    `The level is not the signal; the movement is. ` +
+                    `Threshold ${formatSat(threshold)} sat.`,
                 context: {
                     unit,
                     samples: rows.length,
                     changeSat: (change / 1000n).toString(),
                     gapSat: (gapOf(last) / 1000n).toString(),
+                    movedBySat: Object.fromEntries(
+                        movers.map((c) => [c.label, (c.value / 1000n).toString()]),
+                    ),
                 },
             },
         ]

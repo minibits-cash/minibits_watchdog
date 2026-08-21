@@ -273,7 +273,7 @@ export function ReconciliationPanel({
                     label="↳ of which provably unspendable"
                     value={r.provablyUnspendable}
                     muted
-                    note="declared never-redeemable · added back to own capital, not a real liability"
+                    note="declared never-redeemable · carve out from liabilities, becoming own capital"
                   />
                 )}
               </>
@@ -540,7 +540,7 @@ function ledgerCrossCheck(r: Reconciliation): { value: string; note: string } {
     BigInt(r.depositsUnattributed ?? '0')
   const unexplained = raw - explained
 
-  const ledger = `ledger reads ${formatSat(r.mintOnchainLedger)}`
+  const ledger = ` · ledger reads ${formatSat(r.mintOnchainLedger)}`
   const derivation =
     explained === 0n
       ? `raw gap ${formatSat(raw.toString())}`
